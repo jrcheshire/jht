@@ -1,0 +1,61 @@
+[project]
+name = "jht"
+version = "0.0.0"
+description = "JAX-native spherical harmonic transforms (BK-regime first): GPU-capable, differentiable, dependency-controlled."
+authors = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
+maintainers = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+
+# RUNTIME dependencies are deliberately minimal — this is the dependency-control
+# point of the project. jht itself needs only JAX + numpy. ducc0 / healpy are
+# VALIDATION ORACLES (compared against in tests), never runtime dependencies.
+dependencies = [
+  "jax",
+  "numpy",
+]
+
+[project.optional-dependencies]
+validation = ["ducc0", "healpy"]   # oracles for parity tests only
+dev = ["pytest", "ruff", "mypy"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jht"]
+
+# --- Pixi (standard env tool) -------------------------------------------------
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[tool.pixi.pypi-dependencies]
+jht = { path = ".", editable = true }
+
+[tool.pixi.dependencies]
+python = ">=3.11"
+jax = "*"            # NOTE: conda-forge jax is CPU; GPU/CUDA install is a Phase-3 decision (see ROADMAP).
+numpy = "*"
+# --- validation oracles (dev/test env only; NOT jht runtime deps) ---
+ducc0 = "*"
+healpy = "*"
+# --- dev tooling ---
+pytest = "*"
+ruff = "*"
+mypy = "*"
+
+[tool.pixi.tasks]
+test = "pytest"
+lint = "ruff check"
+format = "ruff format"
+typecheck = "mypy src/jht"
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

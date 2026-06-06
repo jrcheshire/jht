@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Pixi / envs
+.pixi/
+.venv/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Scratch / run outputs (not fixtures)
+runs/
+scratch/
+
+# OS / editor
+.DS_Store
+*.swp
