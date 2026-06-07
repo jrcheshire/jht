@@ -117,21 +117,52 @@ the IAU U-flip, which lives at the *application* layer):
   default, = bk-jax's internal storage); `U_IAU = −U_HEALPix`. Flip only at an
   explicit I/O boundary if a consumer asks for IAU.
 
-## Differentiability
+## Differentiability (Phase 2 — resolved)
 
-- The on-grid SHT is **linear in aₗₘ**, so JVP/VJP are clean to register.
-- **The transpose of `synthesis` is `adjoint_synthesis = Sᵀ = Yᵀ` — the exact,
-  weight-free adjoint, NOT `map2alm`.** map2alm (`A = SᵀW`, quadrature-weighted
-  and iterative) is the *approximate inverse* — a different operator that equals
-  the adjoint only on exact-quadrature grids (never on HEALPix). The VJP/JVP of
-  synthesis is `Sᵀ`; keep the two distinct. (`Sᵀ` is also the only operator the
-  bk-jax seam needs — bk-jax keeps its weighted analysis on ducc.)
-- **Watch the JAX-VJP-convention vs strict-math-adjoint subtlety** that bit
-  bk-jax: JAX's complex-VJP convention introduces a `2·conj(·)` factor on m>0
-  modes relative to the strict math adjoint. Decide which convention each
-  registered transpose exposes, and provide a strict-math-adjoint helper if a
-  consumer (e.g. an operator-form CG solve) needs `Aᵀ` rather than the AD
-  cotangent. Test `jacfwd ≡ jacrev` and ⟨A x, y⟩ = ⟨x, Aᵀ y⟩.
+The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
+**native** autodiff. jht registers **no** custom VJP/JVP rule.
+
+- **Mechanism = native AD.** `jax.grad` / `vjp` / `jacrev` / `jacfwd` all work and
+  are numerically correct. A `custom_vjp` was evaluated and **rejected**: it
+  *blocks forward-mode AD* (so `jacfwd` — and hence `jacfwd ≡ jacrev` — fails on
+  `synthesis` and everything downstream), and the only mechanism that both keeps
+  forward mode and routes reverse through the hand kernel needs JAX's internal
+  `jax.core.Primitive` + manual MLIR lowering (already removed/moved in jax 0.9.2)
+  — fragile, against the pure-JAX dependency-control point. Native AD avoids all
+  of it. Forward scatters carry `unique_indices=True` (the indices are genuinely
+  unique) to keep the kernels transpose-friendly; forward numerics are unchanged.
+- **Two distinct operators, kept separate.** `adjoint_synthesis = Sᵀ = Yᵀ` is the
+  exact, weight-free **strict transpose** (the bk-jax seam / the operator a CG
+  solve needs); `map2alm` (`A = SᵀW`, weighted + iterative) is the *approximate
+  inverse*. Neither is the AD cotangent — keep all three distinct.
+- **The convention (the `2·conj` subtlety that bit bk-jax), pinned.** The packed
+  aₗₘ store only m≥0; a real field's m<0 half is implied, so the alm inner product
+  carries the diagonal metric `G = 2 − δ_{m0}` (`jht.healpix.alm_metric_weight`).
+  JAX's native reverse-mode returns the Euclidean cotangent **in this packing**:
+
+      jax.vjp(synthesis)(v)  ==  G ⊙ conj(adjoint_synthesis(v))
+
+  exact for spin 0 (all modes) and spin 2 (m>0), verified to ~1e-15
+  (`tests/test_grad.py`). So native AD is *numerically identical* to the validated
+  `adjoint_synthesis` kernel — cotangent and strict adjoint differ only by the
+  documented diagonal `G` and a conjugation — and `jax.grad` is therefore
+  finite-difference consistent (JAX's complex-grad returns `dL/dRe − i·dL/dIm`).
+- **Spin-2 m=0 phantom.** `synthesis` keeps both Re→Q and Im→U at every m, so
+  unlike spin 0 (where the final `Re(·)` annihilates Im(aₗ₀)) the map *does* depend
+  on the unphysical Im(aₗ₀) at m=0; the native cotangent reflects it with an extra
+  E/B-mixing term there (`cot_E = bE − i·bB`, `cot_B = bB + i·bE`, with `bE,bB` the
+  real strict-adjoint values — see the bridge in `tests/test_grad.py`). Physical
+  fields have real aₗ₀; the real-DOF layer drops this direction entirely.
+- **Real-DOF layer = the recommended differentiable interface.** `jht.diff`
+  exposes `synthesis_real` / `analysis_real` over the real isometry coordinates `x`
+  (the `jht.masked` isometry `T`, `‖x‖₂ = ‖a‖_w`): plain `R^n → R^m` maps with **no**
+  conj / `2·conj` subtlety — `jacfwd ≡ jacrev` exactly and finite differences are
+  unambiguous. Plus `bandpower` (Cℓ with the `G` fold, == `healpy.alm2cl` to 1e-16).
+  Use this for optimisation / field-level inference.
+- **Tested (`tests/test_grad.py`, gates 1e-12 algebraic / 1e-6 FD):** `jacfwd ≡
+  jacrev`; ⟨S a, v⟩ = ⟨a, Sᵀ v⟩; native-VJP == the `G`-bridge; FD agreement;
+  `jit` / `vmap` cleanliness (note: pre-warm the `_prepare` cache before `vmap`,
+  else a first-trace-inside-vmap leaks a tracer); end-to-end map→alm→Cℓ grad.
 - Geometry/pointing differentiability is the **off-grid NUFFT** story
   (Phase 4), not the on-grid core.
 

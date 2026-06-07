@@ -86,7 +86,9 @@ committed a-priori contract is **weighted + niter=3 ≤ 1e-4**. See
 - **The 2·conj subtlety** showed up concretely: the spin-2 adjoint's naive
   two-channel sum is exactly 2× the strict transpose (the m>0 conjugate-symmetry
   weight). The strict `adjoint_synthesis` (÷2) is the bk-jax seam op; the
-  AD-convention VJP carries `2−δ_{m0}` (Phase-2 work).
+  AD-convention VJP carries `2−δ_{m0}`. *(Phase 2 — RESOLVED: native AD returns
+  `G ⊙ conj(adjoint_synthesis)` with `G = 2−δ_{m0}`, exact to ~1e-15; see
+  `docs/design.md` §Differentiability and `tests/test_grad.py`.)*
 - **Performance is the Phase-1 priority.** The reference transforms loop over
   rings eagerly and recompute the recursion per call — fine for correctness,
   far too slow for production (a single nside=32 sweep burned minutes). Cache the
@@ -95,6 +97,6 @@ committed a-priori contract is **weighted + niter=3 ≤ 1e-4**. See
 ## Next (Phase 1)
 Harden the core: precompute/vectorize the transforms; ring weights + iteration to
 close toward ducc; full nside/ℓmax/spin test matrix; partial-sky path *(all done —
-see `docs/accuracy.md`, `docs/masked.md`)*. Then Phase 2 (differentiability: the
-two transposes, gradient identities) and Phase 3 (GPU + the
-`BK_JAX_SHT_BACKEND=jht` backend).
+see `docs/accuracy.md`, `docs/masked.md`)*. Phase 2 (differentiability) is also
+done *(native AD; `jht.diff` real-DOF layer; `docs/design.md` §Differentiability;
+`tests/test_grad.py`)*. Next: Phase 3 (GPU + the `BK_JAX_SHT_BACKEND=jht` backend).

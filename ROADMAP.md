@@ -96,17 +96,26 @@ discriminating evidence on the s2fft root cause), and a clear go/no-go.
 
 ---
 
-## Phase 2 — Differentiability
+## Phase 2 — Differentiability  *(Done — see `docs/design.md` §Differentiability, `jht.diff`, `tests/test_grad.py`)*
 
-- JVP / VJP for the (alm-linear) transforms; `jit` / `vmap` clean.
+- JVP / VJP for the (alm-linear) transforms; `jit` / `vmap` clean. *(Done —
+  **native AD**, no custom rule: `custom_vjp` was rejected because it blocks
+  forward-mode AD / `jacfwd`, and the kernel-routing alternative needs JAX's
+  internal removed-in-0.9.2 primitive API.)*
 - Handle the **JAX-VJP-convention vs strict-math-adjoint** subtlety
-  deliberately (the `2·conj(·)` on m>0 modes that bit bk-jax). Provide both the
-  AD-convention transpose and a strict-math-adjoint helper if needed.
+  deliberately (the `2·conj(·)` on m>0 modes that bit bk-jax). *(Done — pinned:
+  `jax.vjp(synthesis)(v) == G ⊙ conj(adjoint_synthesis(v))` with the `(2−δ_m0)`
+  metric `G = jht.healpix.alm_metric_weight`, exact to ~1e-15; `adjoint_synthesis`
+  stays the strict transpose; `jht.diff` adds a real-DOF layer with no convention
+  subtlety.)*
 - Gradient tests: `jacfwd ≡ jacrev`, and the inner-product adjoint identity
-  ⟨A x, y⟩ = ⟨x, Aᵀ y⟩ at tight tolerance.
+  ⟨A x, y⟩ = ⟨x, Aᵀ y⟩ at tight tolerance. *(Done — `tests/test_grad.py`, 1e-12
+  algebraic / 1e-6 FD; 15 tests.)*
 
 **Exit criterion:** gradient identities pass; a downstream `jax.grad` through a
-toy "map → aₗₘ → bandpower" chain works end-to-end.
+toy "map → aₗₘ → bandpower" chain works end-to-end. *(Met — `bandpower` == 
+`healpy.alm2cl`; end-to-end `jax.grad` through map→aₗₘ→Cℓ finite, FD-consistent,
+`jit`-clean, both spins.)*
 
 ---
 

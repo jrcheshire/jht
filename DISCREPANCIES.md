@@ -27,3 +27,30 @@ within that subspace, and `reg>0` (Tikhonov) bounds it.
 - **Mitigation / scope:** use `reg>0` to stabilise, restrict the recovered band,
   or treat the ambiguous subspace explicitly — the latter belongs to the Wiener
   / MUSE inner-solve phase, not this rung. See `docs/masked.md`.
+
+## Differentiability: `jax.linear_transpose` / forward-mode of the raw kernels (limitation, not a defect)
+
+The supported autodiff path is JAX's **native reverse/forward AD** through the
+public transforms — `jax.grad` / `vjp` / `jacrev` (complex aₗₘ), and `jacfwd ≡
+jacrev` / FD on the real-DOF layer (`jht.diff`). All Phase-2 gates pass on these
+(`tests/test_grad.py`).
+
+Two lower-level entry points are **not** supported, by deliberate choice:
+
+- `jax.linear_transpose(synthesis, …)` — the forward `lax.scan` in the recursion
+  engine is not directly transposable as a standalone linear function ("Error
+  interpreting argument to scan as a JAX value"). `jax.vjp`/`grad` are unaffected:
+  they linearize first (baking the static recursion plan as constants) and
+  transpose the linearized jaxpr, which is clean. Forward scatters carry
+  `unique_indices=True` so the *scatter*-transpose blocker is gone; the residual is
+  the scan, which native AD sidesteps.
+- `jax.jacfwd` / `jax.jvp` on the **complex** `synthesis` — `jacfwd` requires
+  real-valued inputs (a JAX constraint, not jht-specific). Forward-mode lives on
+  the **real-DOF layer** (`synthesis_real`/`analysis_real`), where `jacfwd ≡
+  jacrev` to ~1e-16.
+
+- **Status:** expected JAX-mechanics limitations with first-class supported
+  alternatives, **not** transform defects. A `custom_vjp` would *block* forward
+  mode entirely; the only kernel-routing fix needs JAX's internal `jax.core.
+  Primitive` API (removed in jax 0.9.2). Native AD is the chosen, version-stable
+  path. See `docs/design.md` §Differentiability.
