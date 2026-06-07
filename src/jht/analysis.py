@@ -1,38 +1,54 @@
 """HEALPix analysis: map -> a_lm (the approximate inverse).
 
-The bare estimator ``A0 = (4pi/Npix) S^T`` is the unweighted adjoint scaled to
-the pixel solid angle; it is *not* exact on HEALPix (no sampling theorem), so it
-sits at the ~1e-3 floor.  :func:`map2alm` adds a Jacobi / stationary-Richardson
-iteration on the residual,
+The bare estimator weights each pixel by its quadrature weight and applies the
+adjoint, ``A0 = S^T W``.  With ring weights (the default, :mod:`jht.weights`)
+``W`` makes the m=0 colatitude quadrature exact across the band, dropping the
+floor from ~1e-3 (uniform ``4pi/Npix``) toward ~1e-4; ``use_weights=False``
+recovers the bare uniform estimator.  Neither is exact on HEALPix (no sampling
+theorem), so :func:`map2alm` adds a Jacobi / stationary-Richardson iteration on
+the residual,
 
     a_{k+1} = a_k + A0 (map - S a_k),
 
-which refines a band-limited map toward the true a_lm (Drake & Wright 2020:
-this is Richardson iteration on the normal equations ``S^T S a = S^T map``;
-it converges because the HEALPix points are quasi-uniform).  No ring weights yet
--- that is the next accuracy rung (deferred per the Phase-0 decision).
+which refines a band-limited map toward the true a_lm (Richardson iteration on
+the normal equations ``S^T W S a = S^T W map``; it converges because the HEALPix
+points are quasi-uniform, and ring weights condition it so it reaches machine
+precision in a few steps -- see ``docs/accuracy.md``).
 
 Distinct from :func:`jht.healpix.adjoint_synthesis`, which is the *exact*
-transpose ``S^T`` (the bk-jax seam / the VJP), not an inverse.
+(unweighted) transpose ``S^T`` (the bk-jax seam / the VJP), not an inverse.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import jax
+import jax.numpy as jnp
 
 from .healpix import adjoint_synthesis, synthesis
+from .weights import pixel_weights
 
 
-def bare_analysis(maps, nside: int, lmax: int, spin: int = 0) -> jax.Array:
-    """``A0 = (4pi/Npix) S^T`` -- the bare (unweighted, non-iterated) estimator."""
-    npix = 12 * nside**2
-    return (4.0 * 3.141592653589793 / npix) * adjoint_synthesis(maps, nside, lmax, spin)
+@lru_cache(maxsize=None)
+def _wvec(nside: int, spin: int, use_weights: bool) -> jax.Array:
+    """Per-pixel quadrature weights as a (broadcastable) jax array, cached."""
+    wv = jnp.asarray(pixel_weights(nside, use_weights))
+    return wv if spin == 0 else wv[None, :]  # (Npix,) for spin 0, (1, Npix) for spin 2
 
 
-def map2alm(maps, nside: int, lmax: int, spin: int = 0, niter: int = 3) -> jax.Array:
+def bare_analysis(maps, nside: int, lmax: int, spin: int = 0, use_weights: bool = True) -> jax.Array:
+    """``A0 = S^T W`` -- the bare (non-iterated) estimator with quadrature weights."""
+    wmaps = _wvec(nside, spin, use_weights) * jnp.asarray(maps)
+    return adjoint_synthesis(wmaps, nside, lmax, spin)
+
+
+def map2alm(
+    maps, nside: int, lmax: int, spin: int = 0, niter: int = 3, use_weights: bool = True
+) -> jax.Array:
     """Approximate inverse with ``niter`` Jacobi refinement steps (``niter=0`` = bare)."""
-    a = bare_analysis(maps, nside, lmax, spin)
+    a = bare_analysis(maps, nside, lmax, spin, use_weights)
     for _ in range(niter):
         residual = maps - synthesis(a, nside, lmax, spin)
-        a = a + bare_analysis(residual, nside, lmax, spin)
+        a = a + bare_analysis(residual, nside, lmax, spin, use_weights)
     return a

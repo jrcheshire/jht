@@ -37,7 +37,9 @@ def _roundtrip(m0, spin, niter, channel=0):
         a = np.zeros((2, alm_size(LMAX)), complex)
         a[channel, alm_column_base(m0, LMAX) + (L0 - m0)] = 1.0
     rec = np.asarray(
-        map2alm(synthesis(a, NSIDE, LMAX, spin=spin), NSIDE, LMAX, spin=spin, niter=niter)
+        map2alm(  # use_weights=False: this gate characterizes the bare *unweighted* floor
+            synthesis(a, NSIDE, LMAX, spin=spin), NSIDE, LMAX, spin=spin, niter=niter, use_weights=False
+        )
     )
     return float(np.max(np.abs(rec - a)))
 
