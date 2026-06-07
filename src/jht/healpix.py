@@ -12,19 +12,27 @@ Conventions (verified vs healpy / ducc0; see ``docs/design.md``):
 transpose ``S^T = Y^T`` (unweighted; **not** the weighted map2alm), which is the
 operator the bk-jax seam needs and the VJP of synthesis.
 
-This is the Phase-0 reference implementation: correctness first.  It uses a
-Python loop over rings (RING order is north->south, so the map is the
-concatenation of the per-ring arrays); batching equal-length rings / vmap is a
-Phase-1 performance task.  Library code does not enable x64; callers opt in.
+**Phase-1 fast path.**  The transforms are vectorized over m (one fused
+``lax.scan`` per spin via :mod:`jht._recursion`), batch the per-ring phi-FFTs by
+ring length (the equatorial belt in one FFT; the polar cap by length-group), and
+are ``jit``-compiled.  Geometry, recursion plans, and index maps are built once
+per ``(nside, lmax, spin)`` and cached (``lru_cache`` on :func:`_prepare`), so the
+Jacobi iteration in :func:`jht.analysis.map2alm` reuses one compiled kernel.
+Numerics are identical to the eager Phase-0 reference (:mod:`jht._reference`),
+which is retained as a validation oracle.  Library code does not enable x64;
+callers opt in per entry point.
 """
 
 from __future__ import annotations
+
+from functools import lru_cache
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._recursion import normalized_legendre, spin_weighted_lambda
+from ._recursion import adjoint_contract, build_recursion_plan, synth_contract
 
 
 # --------------------------------------------------------------------------- #
@@ -37,6 +45,30 @@ def alm_size(lmax: int) -> int:
 def alm_column_base(m: int, lmax: int) -> int:
     """Start index of the contiguous column ``a_{l,m}, l = m..lmax``."""
     return m * (2 * lmax + 1 - m) // 2 + m
+
+
+def _tri_dense_maps(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Index maps between healpy-triangular a_lm and the dense ``(M, lmax+1)`` grid.
+
+    Returns ``(gather_idx, valid_mask, scatter_flat)``:
+    * ``gather_idx[m,l]`` -> flat triangular index (0 where invalid);
+    * ``valid_mask[m,l]`` -> True where ``l >= m``;
+    * ``scatter_flat`` is ``gather_idx`` flattened with invalid entries pointed
+      out of bounds (``alm_size``) for ``.at[...].set(..., mode='drop')``.
+    """
+    M = lmax + 1
+    gather = np.zeros((M, M), dtype=np.int64)
+    valid = np.zeros((M, M), dtype=bool)
+    K = alm_size(lmax)
+    scatter = np.full((M, M), K, dtype=np.int64)
+    for m in range(M):
+        base = alm_column_base(m, lmax)
+        ells = np.arange(m, lmax + 1)
+        idx = base + (ells - m)
+        gather[m, m:] = idx
+        valid[m, m:] = True
+        scatter[m, m:] = idx
+    return gather, valid, scatter.ravel()
 
 
 # --------------------------------------------------------------------------- #
@@ -78,138 +110,167 @@ class RingInfo:
         self.nrings = len(i)
 
 
+class _RingGroup(NamedTuple):
+    """Rings sharing a length ``N`` (statically batched into one FFT)."""
+
+    N: int
+    ring_idx: np.ndarray  # (n_g,) ring indices into the (nrings,) arrays
+    pix_idx: np.ndarray  # (n_g, N) flat pixel indices in the map
+    k_plus: np.ndarray  # (M,)   +m fold-in columns  (m mod N)
+    k_minus: np.ndarray  # (M-1,) -m fold-in columns  ((-m) mod N), m>=1
+    g_plus: np.ndarray  # (M,)   +m gather columns    (m mod N)
+    g_minus: np.ndarray  # (M,)   -m gather columns    ((-m) mod N)
+
+
+def _ring_groups(geo: RingInfo, lmax: int) -> list[_RingGroup]:
+    m_pos = np.arange(lmax + 1)
+    groups = []
+    for N in np.unique(geo.npix_ring):
+        N = int(N)
+        ring_idx = np.flatnonzero(geo.npix_ring == N)
+        pix_idx = geo.startpix[ring_idx][:, None] + np.arange(N)[None, :]
+        groups.append(
+            _RingGroup(
+                N=N,
+                ring_idx=ring_idx,
+                pix_idx=pix_idx,
+                k_plus=m_pos % N,
+                k_minus=(-m_pos[1:]) % N,
+                g_plus=m_pos % N,
+                g_minus=(-m_pos) % N,
+            )
+        )
+    return groups
+
+
 # --------------------------------------------------------------------------- #
-# synthesis  S: a_lm -> map
+# prepared (cached) transform kernels
 # --------------------------------------------------------------------------- #
-def _ring_coeffs_spin0(alm, x, lmax: int) -> jax.Array:
-    """F_m(theta_r) = sum_l a_{l,m} lambda_{l,m}(theta_r), shape (lmax+1, nrings)."""
-    rows = []
-    for m in range(lmax + 1):
-        lam = normalized_legendre(x, m, lmax)  # (lmax-m+1, nrings), real
-        base = alm_column_base(m, lmax)
-        a_m = alm[base : base + (lmax - m + 1)]  # (lmax-m+1,), complex
-        rows.append(jnp.tensordot(a_m, lam, axes=([0], [0])))  # (nrings,)
-    return jnp.stack(rows, axis=0)
+class _Prepared(NamedTuple):
+    synth: Callable[[jax.Array], jax.Array]
+    adj: Callable[[jax.Array], jax.Array]
 
 
-def _ring_to_pixels(Gm, npix_ring: int, lmax: int) -> jax.Array:
-    """Real ring values from per-m coeffs G_m (phase already applied), with the
-    polar-cap spectral folding (m wrapped mod npix_ring)."""
-    m_pos = jnp.arange(lmax + 1)
-    C = jnp.zeros(npix_ring, dtype=Gm.dtype)
-    C = C.at[m_pos % npix_ring].add(Gm)  # +m
-    C = C.at[(-m_pos[1:]) % npix_ring].add(jnp.conj(Gm[1:]))  # -m (real-map Hermitian)
-    return jnp.real(jnp.fft.ifft(C) * npix_ring)
-
-
-# --- spin-2 (polarization): (aE, aB) <-> (Q, U), COSMO convention ----------- #
-def _spin2_ring_coeffs(aE, aB, x, lmax: int):
-    """Spin +/-2 ring coefficients Fp_m, Fm_m, each shape (lmax+1, nrings)."""
-    fp, fm = [], []
-    for m in range(lmax + 1):
-        lmin = max(m, 2)
-        lp = spin_weighted_lambda(x, m, 2, lmax)  # (lmax-lmin+1, nrings)
-        lm = spin_weighted_lambda(x, m, -2, lmax)
-        base = alm_column_base(m, lmax)
-        off = lmin - m  # E/B have no l < 2
-        aEc = aE[base + off : base + (lmax - m + 1)]
-        aBc = aB[base + off : base + (lmax - m + 1)]
-        fp.append(jnp.tensordot(-(aEc + 1j * aBc), lp, axes=([0], [0])))
-        fm.append(jnp.tensordot(-(aEc - 1j * aBc), lm, axes=([0], [0])))
-    return jnp.stack(fp), jnp.stack(fm)
-
-
-def _synthesis_spin2(alm, nside: int, lmax: int) -> jax.Array:
-    """(aE, aB) -> (Q, U); alm shape ``(2, K)``, returns ``(2, npix)``."""
+@lru_cache(maxsize=None)
+def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
+    if spin not in (0, 2):
+        raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
     geo = RingInfo(nside)
+    npix = geo.npix
     x = jnp.asarray(geo.z)
-    Fp, Fm = _spin2_ring_coeffs(alm[0], alm[1], x, lmax)
-    m_pos = jnp.arange(lmax + 1)
-    q_rings, u_rings = [], []
-    for r in range(geo.nrings):
-        N = int(geo.npix_ring[r])
-        ph = jnp.exp(1j * m_pos * geo.phi0[r])
-        D = jnp.zeros(N, dtype=jnp.complex128)
-        D = D.at[m_pos % N].add(Fp[:, r] * ph)  # +m  (spin +2)
-        D = D.at[(-m_pos[1:]) % N].add(jnp.conj(Fm[1:, r] * ph[1:]))  # -m  (spin -2)
-        qu = jnp.fft.ifft(D) * N
-        q_rings.append(jnp.real(qu))
-        u_rings.append(jnp.imag(qu))
-    return jnp.stack([jnp.concatenate(q_rings), jnp.concatenate(u_rings)])
+    groups = _ring_groups(geo, lmax)
+    gather, valid, scatter_flat = _tri_dense_maps(lmax)
+    gather_j = jnp.asarray(gather)
+    valid_j = jnp.asarray(valid)
+    scatter_j = jnp.asarray(scatter_flat)
+    K = alm_size(lmax)
+
+    # per-(m, ring) azimuth phase e^{i m phi0_r}
+    m_pos = np.arange(lmax + 1)
+    phase = jnp.asarray(np.exp(1j * m_pos[:, None] * geo.phi0[None, :]))  # (M, nrings)
+    conj_phase = jnp.conj(phase)
+
+    def tri_to_dense(alm):  # (K,) -> (M, lmax+1)
+        return jnp.where(valid_j, alm[gather_j], 0.0 + 0.0j)
+
+    def dense_to_tri(b_dense):  # (M, lmax+1) -> (K,)
+        out = jnp.zeros(K, dtype=jnp.complex128)
+        return out.at[scatter_j].set(b_dense.ravel(), mode="drop")
+
+    if spin == 0:
+        plan = build_recursion_plan(geo.z, 0, lmax)
+
+        @jax.jit
+        def synth(alm):
+            F = synth_contract(plan, x, tri_to_dense(alm))  # (M, nrings)
+            G = F * phase
+            out = jnp.zeros(npix, dtype=jnp.float64)
+            for g in groups:
+                Cp = G[:, g.ring_idx]  # (M, n_g)
+                D = jnp.zeros((g.ring_idx.size, g.N), dtype=jnp.complex128)
+                D = D.at[:, g.k_plus].add(Cp.T)
+                D = D.at[:, g.k_minus].add(jnp.conj(Cp[1:].T))
+                vals = jnp.real(jnp.fft.ifft(D, axis=1) * g.N)  # (n_g, N)
+                out = out.at[g.pix_idx.ravel()].set(vals.ravel())
+            return out
+
+        @jax.jit
+        def adj(m):
+            V = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
+            for g in groups:
+                fr = jnp.fft.fft(m[g.pix_idx], axis=1)  # (n_g, N)
+                ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
+                Vg = fr[:, g.g_plus] * ph  # (n_g, M)
+                V = V.at[:, g.ring_idx].set(Vg.T)
+            return dense_to_tri(adjoint_contract(plan, x, V))
+
+        return _Prepared(synth, adj)
+
+    plan_p = build_recursion_plan(geo.z, 2, lmax)
+    plan_m = build_recursion_plan(geo.z, -2, lmax)
+
+    @jax.jit
+    def synth2(alm2d):  # (2, K) -> (2, npix)
+        aE = tri_to_dense(alm2d[0])
+        aB = tri_to_dense(alm2d[1])
+        Fp = synth_contract(plan_p, x, -(aE + 1j * aB)) * phase
+        Fm = synth_contract(plan_m, x, -(aE - 1j * aB)) * phase
+        Q = jnp.zeros(npix, dtype=jnp.float64)
+        U = jnp.zeros(npix, dtype=jnp.float64)
+        for g in groups:
+            Cp = Fp[:, g.ring_idx]
+            Cm = Fm[:, g.ring_idx]
+            D = jnp.zeros((g.ring_idx.size, g.N), dtype=jnp.complex128)
+            D = D.at[:, g.k_plus].add(Cp.T)
+            D = D.at[:, g.k_minus].add(jnp.conj(Cm[1:].T))
+            qu = jnp.fft.ifft(D, axis=1) * g.N  # (n_g, N)
+            Q = Q.at[g.pix_idx.ravel()].set(jnp.real(qu).ravel())
+            U = U.at[g.pix_idx.ravel()].set(jnp.imag(qu).ravel())
+        return jnp.stack([Q, U])
+
+    @jax.jit
+    def adj2(maps2d):  # (2, npix) -> (2, K)
+        Vp = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
+        Vm = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
+        for g in groups:
+            W = jnp.fft.fft(maps2d[0][g.pix_idx] + 1j * maps2d[1][g.pix_idx], axis=1)  # (n_g, N)
+            ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
+            Fpb = W[:, g.g_plus] * ph
+            Fmb = jnp.conj(W[:, g.g_minus]) * ph
+            Vp = Vp.at[:, g.ring_idx].set(Fpb.T)
+            Vm = Vm.at[:, g.ring_idx].set(Fmb.T)
+        p2 = adjoint_contract(plan_p, x, Vp)  # (M, lmax+1)
+        m2 = adjoint_contract(plan_m, x, Vm)
+        aE = 0.5 * (-p2 - m2)
+        aB = 0.5 * (1j * p2 - 1j * m2)
+        return jnp.stack([dense_to_tri(aE), dense_to_tri(aB)])
+
+    return _Prepared(synth2, adj2)
 
 
-def _adjoint_synthesis_spin2(maps, nside: int, lmax: int) -> jax.Array:
-    """Strict transpose of spin-2 synthesis; ``(Q, U) -> (aE, aB)`` shape ``(2, K)``.
-
-    Equals ``(Npix/4pi) * healpy.map2alm_spin([Q, U], 2, lmax)``.  The 1/2 vs the
-    naive two-channel sum is the m>0 conjugate-symmetry weight (the documented
-    ``2.conj`` subtlety; the AD-convention VJP carries ``2 - delta_{m0}`` instead).
-    """
-    geo = RingInfo(nside)
-    x = jnp.asarray(geo.z)
-    m_pos = jnp.arange(lmax + 1)
-    fpb, fmb = [], []
-    for r in range(geo.nrings):
-        N = int(geo.npix_ring[r])
-        s = geo.startpix[r]
-        QU = maps[0][s : s + N] + 1j * maps[1][s : s + N]
-        W = jnp.fft.fft(QU)
-        ph = jnp.exp(-1j * m_pos * geo.phi0[r])
-        fpb.append(W[m_pos % N] * ph)
-        fmb.append(jnp.conj(W[(-m_pos) % N]) * ph)
-    Fpb = jnp.stack(fpb, axis=1)
-    Fmb = jnp.stack(fmb, axis=1)
-    aE_blocks, aB_blocks = [], []
-    for m in range(lmax + 1):
-        lmin = max(m, 2)
-        lp = spin_weighted_lambda(x, m, 2, lmax)
-        lm = spin_weighted_lambda(x, m, -2, lmax)
-        p2 = jnp.tensordot(lp, Fpb[m], axes=([1], [0]))
-        m2 = jnp.tensordot(lm, Fmb[m], axes=([1], [0]))
-        ae = 0.5 * (-p2 - m2)
-        ab = 0.5 * (1j * p2 - 1j * m2)
-        pad = lmin - m  # leading zeros for the absent l < 2
-        if pad:
-            z = jnp.zeros(pad, dtype=ae.dtype)
-            ae, ab = jnp.concatenate([z, ae]), jnp.concatenate([z, ab])
-        aE_blocks.append(ae)
-        aB_blocks.append(ab)
-    return jnp.stack([jnp.concatenate(aE_blocks), jnp.concatenate(aB_blocks)])
-
-
+# --------------------------------------------------------------------------- #
+# public transforms
+# --------------------------------------------------------------------------- #
 def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     """``S: a_lm -> map`` on the HEALPix RING grid.
 
     Parameters
     ----------
-    alm : complex array, shape ``(alm_size(lmax),)``
-        healpy-packed coefficients (spin-0 / temperature).
+    alm : complex array
+        healpy-packed coefficients: shape ``(alm_size(lmax),)`` for ``spin=0``,
+        ``(2, alm_size(lmax))`` (E, B) for ``spin=2``.
     nside, lmax : int
     spin : int
-        Only ``spin == 0`` is implemented here; spin-2 lands next.
+        ``0`` (temperature) or ``2`` (polarization Q/U).
 
     Returns
     -------
-    m : real array, shape ``(12 nside**2,)`` in RING order.
+    map : real array, ``(12 nside**2,)`` for ``spin=0`` or ``(2, 12 nside**2)``
+        (Q, U) for ``spin=2``, in RING order.
     """
-    if spin == 2:
-        return _synthesis_spin2(alm, nside, lmax)
-    if spin != 0:
-        raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
-    geo = RingInfo(nside)
-    x = jnp.asarray(geo.z)
-    Fm = _ring_coeffs_spin0(alm, x, lmax)  # (lmax+1, nrings)
-    m_pos = jnp.arange(lmax + 1)
-    rings = []
-    for r in range(geo.nrings):
-        Gm = Fm[:, r] * jnp.exp(1j * m_pos * geo.phi0[r])
-        rings.append(_ring_to_pixels(Gm, int(geo.npix_ring[r]), lmax))
-    return jnp.concatenate(rings)
+    return _prepare(nside, lmax, spin).synth(jnp.asarray(alm))
 
 
-# --------------------------------------------------------------------------- #
-# adjoint synthesis  S^T = Y^T : map -> a_lm  (the exact, unweighted transpose)
-# --------------------------------------------------------------------------- #
 def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     """``S^T = Y^H : map -> a_lm`` -- the *exact* transpose of :func:`synthesis`.
 
@@ -220,28 +281,8 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
         adjoint_synthesis(v) == (Npix / 4pi) * healpy.map2alm(v, iter=0)   (no weights)
 
     and the inner-product identity ``<S a, v>_map == <a, S^T v>_alm`` in the
-    ``(2 - delta_{m0})``-weighted a_lm inner product.
+    ``(2 - delta_{m0})``-weighted a_lm inner product.  For ``spin=2`` the spin-2
+    adjoint carries the factor-1/2 (m>0 conjugate-symmetry weight) so it is the
+    strict transpose; the input is ``(2, npix)`` (Q, U) and the output ``(2, K)``.
     """
-    if spin == 2:
-        return _adjoint_synthesis_spin2(m, nside, lmax)
-    if spin != 0:
-        raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
-    geo = RingInfo(nside)
-    x = jnp.asarray(geo.z)
-    m_pos = jnp.arange(lmax + 1)
-
-    # per-ring m-coefficients V_m(r) = e^{-i m phi0_r} * FFT(ring)[m mod N]
-    Vm_cols = []
-    for r in range(geo.nrings):
-        N = int(geo.npix_ring[r])
-        v_ring = m[geo.startpix[r] : geo.startpix[r] + N]
-        fr = jnp.fft.fft(v_ring)  # sum_j v_j e^{-2pi i k j / N}
-        Vm_cols.append(fr[m_pos % N] * jnp.exp(-1j * m_pos * geo.phi0[r]))
-    Vm = jnp.stack(Vm_cols, axis=1)  # (lmax+1, nrings)
-
-    # contract over rings: b_{l,m} = sum_r lambda_{l,m}(theta_r) V_m(r)
-    blocks = []
-    for mm in range(lmax + 1):
-        lam = normalized_legendre(x, mm, lmax)  # (lmax-mm+1, nrings)
-        blocks.append(jnp.tensordot(lam, Vm[mm], axes=([1], [0])))
-    return jnp.concatenate(blocks)  # m-major packing == healpy layout
+    return _prepare(nside, lmax, spin).adj(jnp.asarray(m))

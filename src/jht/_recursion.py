@@ -27,6 +27,7 @@ Library code does **not** enable x64; callers opt in per entry point via
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -207,3 +208,190 @@ def spin_weighted_lambda(x, m: int, spin: int, lmax: int) -> jax.Array:
     ell = np.arange(lmin, lmax + 1, dtype=np.float64)
     pref = ((-1.0) ** m) * np.sqrt((2.0 * ell + 1.0) / (4.0 * np.pi))
     return jnp.asarray(pref, d.dtype)[:, None] * d
+
+
+# --------------------------------------------------------------------------- #
+# Vectorized all-m recursion + fused contraction (Phase 1 performance).
+#
+# The per-m functions above are the *validated reference*.  For production we run
+# every m through a single ``lax.scan`` over l (one fused, jit/vmap-clean kernel
+# instead of lmax+1 eager scans), and **fuse the l-contraction into the scan** so
+# the full lambda table is never materialized -- peak memory is O(M.n_theta), not
+# O(L.M.n_theta) (~16 GB/component at nside=2048).  The static recurrence/seed
+# tables are built once in numpy by reusing the exact coefficient helpers above,
+# so the numerics are identical to the reference by construction:
+#
+#   spin-0 -> Legendre 3-term (a_l, b_l) + sectoral seed   (pref == 1)
+#   spin-2 -> Wigner-d 3-term (A_l, C_l, B_l) + exact seed  (pref = (-1)^m * sqrt((2l+1)/4pi))
+#
+# Tables are stored l-major ((lmax+1, M)) so the scan iterates over the leading
+# axis directly.  lambda_{l,m} carries an O(1) mantissa + a log-scale (the same
+# branch-free log-renorm as the reference); inactive (l<lmin(m)) and seed
+# (l==lmin(m)) steps are handled branch-free via per-(l,m) masks.
+# --------------------------------------------------------------------------- #
+class RecursionPlan(NamedTuple):
+    """Static (numpy) tables driving the vectorized all-m recursion for one spin.
+
+    Grids are ``(lmax+1, M)`` (l-major, M = lmax+1 orders); ``seed_log`` is
+    ``(M, n_theta)``; ``seed_sign`` is ``(M,)``.  ``spin`` and ``lmax`` are kept
+    for shape/spin bookkeeping by callers.
+    """
+
+    A: np.ndarray
+    B: np.ndarray
+    C: np.ndarray
+    pref: np.ndarray
+    seed_sign: np.ndarray
+    seed_log: np.ndarray
+    is_seed: np.ndarray
+    is_active: np.ndarray
+    spin: int
+    lmax: int
+
+
+def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
+    """Precompute the static all-m recursion tables at colatitudes ``x=cos(theta)``.
+
+    ``spin`` is one of ``0, +2, -2``.  ``x`` is a concrete ``(n_theta,)`` array of
+    ring colatitudes (HEALPix geometry is static), so the whole plan is numpy and
+    becomes compile-time constants inside the jitted transform.
+    """
+    spin = int(spin)
+    if spin not in (0, 2, -2):
+        raise NotImplementedError(f"spin={spin} unsupported (only 0, +2, -2)")
+    x = np.asarray(x, dtype=np.float64)
+    M = lmax + 1
+    L1 = lmax + 1
+    abs_s = abs(spin)
+    lmin = np.maximum(np.arange(M), abs_s)  # max(m, |spin|)
+
+    ell_idx = np.arange(L1)[:, None]  # (L1, 1)
+    is_active = ell_idx >= lmin[None, :]  # (L1, M)
+    is_seed = ell_idx == lmin[None, :]
+
+    A = np.zeros((L1, M), dtype=np.float64)
+    B = np.zeros((L1, M), dtype=np.float64)
+    C = np.zeros((L1, M), dtype=np.float64)
+    seed_sign = np.zeros(M, dtype=np.float64)
+    seed_log = np.zeros((M, x.shape[0]), dtype=np.float64)
+    pref: np.ndarray
+
+    if spin == 0:
+        pref = np.ones((L1, M), dtype=np.float64)
+        sin_t = np.sqrt(np.clip(1.0 - x * x, 0.0, 1.0))
+        with np.errstate(divide="ignore"):
+            log_sin = np.log(sin_t)
+        for m in range(M):
+            a, b = legendre_recurrence_coeffs(m, lmax)  # produce lambda_{m+1..lmax}
+            if a.size:
+                A[m + 1 : lmax + 1, m] = a
+                B[m + 1 : lmax + 1, m] = b
+            seed_sign[m] = 1.0 if (m % 2 == 0) else -1.0
+            const = _sectoral_seed_logabs(m)
+            seed_log[m] = const if m == 0 else const + m * log_sin
+    else:
+        ell = np.arange(L1, dtype=np.float64)
+        pref = (((-1.0) ** np.arange(M))[None, :]) * np.sqrt((2.0 * ell + 1.0) / (4.0 * np.pi))[
+            :, None
+        ]
+        xj = jnp.asarray(x)
+        for m in range(M):
+            lm = int(lmin[m])
+            if lm < lmax:
+                Ac, Cc, Bc = wigner_recurrence_coeffs(-m, spin, lm, lmax)  # produce d^{lm+1..lmax}
+                A[lm + 1 : lmax + 1, m] = Ac
+                C[lm + 1 : lmax + 1, m] = Cc
+                B[lm + 1 : lmax + 1, m] = Bc
+            sign, logabs = _wigner_seed(xj, -m, spin, lm)
+            seed_sign[m] = sign
+            seed_log[m] = np.asarray(logabs)
+
+    return RecursionPlan(A, B, C, pref, seed_sign, seed_log, is_seed, is_active, spin, lmax)
+
+
+def _plan_arrays(plan: RecursionPlan):
+    """Convert the static plan grids to jnp once (compile-time constants)."""
+    return (
+        jnp.asarray(plan.A),
+        jnp.asarray(plan.B),
+        jnp.asarray(plan.C),
+        jnp.asarray(plan.pref),
+        jnp.asarray(plan.seed_sign),
+        jnp.asarray(plan.seed_log),
+        jnp.asarray(plan.is_seed),
+        jnp.asarray(plan.is_active),
+    )
+
+
+def _rec_step(p, q, s, A_c, B_c, C_c, is_seed_c, is_active_c, x, seed_sign, seed_log):
+    """One l-step of the all-m recursion; returns the new carry and lambda row.
+
+    ``p, q, s`` are ``(M, T)`` (mantissa of lambda_{l-1}, lambda_{l-2}, and the
+    log-scale).  ``A_c, B_c, C_c, is_*_c`` are the ``(M,)`` column for this l.
+    """
+    raw = (A_c[:, None] * x[None, :] + C_c[:, None]) * p - B_c[:, None] * q
+    r = jnp.sqrt(raw * raw + p * p)
+    r = jnp.where(r == 0.0, 1.0, r)
+    rp, rq, rs = raw / r, p / r, s + jnp.log(r)
+    is_recur = is_active_c & ~is_seed_c  # l > lmin
+    sd = is_seed_c[:, None]
+    rc = is_recur[:, None]
+    new_p = jnp.where(sd, seed_sign[:, None], jnp.where(rc, rp, p))
+    new_q = jnp.where(sd, 0.0, jnp.where(rc, rq, q))
+    new_s = jnp.where(sd, seed_log, jnp.where(rc, rs, s))
+    lam = jnp.where(is_active_c[:, None], new_p * jnp.exp(new_s), 0.0)
+    return new_p, new_q, new_s, lam
+
+
+def synth_contract(plan: RecursionPlan, x, alm_dense) -> jax.Array:
+    """``F_m(theta) = sum_l alm_dense[m,l] * lambda^s_{l,m}(theta)`` for all m.
+
+    ``alm_dense`` is the dense ``(M, lmax+1)`` coefficient grid (``a_{l,m}``, zero
+    where ``l < lmin(m)``).  Returns ``F`` of shape ``(M, n_theta)`` complex --
+    the per-m ring coefficients before the phi-FFT.
+    """
+    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    x = jnp.asarray(x)
+    M, T = seed_log.shape
+    alm_T = jnp.asarray(alm_dense).T  # (L1, M)
+
+    def body(carry, xs):
+        p, q, s, F = carry
+        A_c, B_c, C_c, pref_c, alm_c, seed_c, act_c = xs
+        new_p, new_q, new_s, lam = _rec_step(
+            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
+        )
+        F = F + (alm_c * pref_c)[:, None] * lam
+        return (new_p, new_q, new_s, F), None
+
+    z = jnp.zeros((M, T), dtype=jnp.float64)
+    init = (z, z, z, jnp.zeros((M, T), dtype=jnp.complex128))
+    (_, _, _, F), _ = jax.lax.scan(body, init, (A, B, C, pref, alm_T, is_seed, is_active))
+    return F
+
+
+def adjoint_contract(plan: RecursionPlan, x, V) -> jax.Array:
+    """``b_{l,m} = sum_theta lambda^s_{l,m}(theta) * V[m,theta]`` for all (l, m).
+
+    ``V`` is the ``(M, n_theta)`` per-m ring data (post phi-FFT).  Returns the
+    dense ``(M, lmax+1)`` coefficient grid ``b_{l,m}`` (zero where ``l<lmin(m)``).
+    This is the l-contraction of the exact adjoint; the FFT side lives in
+    ``healpix.py``.
+    """
+    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    x = jnp.asarray(x)
+    V = jnp.asarray(V)
+    M, T = seed_log.shape
+
+    def body(carry, xs):
+        p, q, s = carry
+        A_c, B_c, C_c, pref_c, seed_c, act_c = xs
+        new_p, new_q, new_s, lam = _rec_step(
+            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
+        )
+        b_col = pref_c * jnp.sum(lam * V, axis=1)  # (M,)
+        return (new_p, new_q, new_s), b_col
+
+    z = jnp.zeros((M, T), dtype=jnp.float64)
+    _, b = jax.lax.scan(body, (z, z, z), (A, B, C, pref, is_seed, is_active))  # b: (L1, M)
+    return b.T
