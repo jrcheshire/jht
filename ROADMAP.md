@@ -119,20 +119,40 @@ toy "map → aₗₘ → bandpower" chain works end-to-end. *(Met — `bandpower
 
 ---
 
-## Phase 3 — GPU + bk-jax integration
+## Phase 3 — GPU enablement + standalone dependency
 
-- Settle the **GPU JAX install** story (conda-forge jax is CPU; CUDA needs the
-  right channel/pip + a Cannon-compatible setup). Bench on an actual GPU.
-- Performance tuning for the BK regime (memory footprint at nside/ℓ_max,
-  batching over realizations).
-- Expose jht as a `BK_JAX_SHT_BACKEND` backend in bk-jax; add jht as a
-  dependency there.
-- End-to-end parity in bk-jax's **GPU/differentiable tier** (a forecast sweep
-  or the MUSE inner solve) within the agreed accuracy tier — explicitly NOT
-  displacing ducc on the purity-critical production path.
+**Reframed (2026-06-07):** the goal is *not* to couple jht to bk-jax. jht
+becomes a clean, GPU-ready **standalone dependency** that any consumer (bk-jax
+first) can adopt *in place of ducc0* — and that adoption is done from the
+*consumer's* side, not built into jht. jht stays bk-jax-agnostic (it already is).
+Two tracks:
 
-**Exit criterion:** a real bk-jax GPU/diff workload runs through jht and agrees
-with the ducc path to the agreed tier, with a measured GPU speedup.
+**GPU enablement** *(prepare now; measured run deferred to an NVIDIA box / Cannon)*:
+- **GPU JAX install** settled as a locked **pixi `gpu` environment** (conda-forge
+  CUDA `jaxlib`, linux-64, py313 — see `docs/gpu.md`). conda-forge jax defaults to
+  CPU; the CUDA build lives in this env. Solvable/committable without a GPU.
+- A GPU **parity gate + benchmark harness** (`scripts/gpu_check.py`,
+  `tests/test_gpu.py`): fp64 GPU==CPU to ~1e-12, timing + `vmap`-batch, memory;
+  skips cleanly with no GPU. *(Code is device-agnostic — no change needed.)*
+- The **x64-per-entry-point** contract documented (the silent fp64→fp32 footgun).
+- Deferred memory lever: the unrolled cap-FFT scatters (~11–13 GB at the ceiling
+  — pad-and-fold); bench on GPU first, optimize only if it bites.
+
+**Standalone-dependency surface** *(the decoupling)*:
+- A curated public API (`jht.__all__`) + version bump; the stale README rewritten.
+- A consumer-seam doc (`docs/consumers.md`): operator path
+  (`synthesis`/`adjoint_synthesis`/`map2alm`), grad path (`jht.diff`), the
+  `(2−δ_m0)` convention bridge, and the accuracy boundary (GPU/diff tier, **not**
+  the ducc purity tier). Backend wiring (e.g. `BK_JAX_SHT_BACKEND`) is the
+  consumer's responsibility — explicitly out of jht's scope.
+- *(Deferred to publish time: PyPI build/tag — with the "James Cheshire"
+  name-check release blocker — LICENSE file, CHANGELOG, CI.)*
+
+**Exit criterion:** jht imports and round-trips through a curated public API; the
+GPU env solves + locks and `pixi run -e gpu` runs the harness on an NVIDIA box at
+the documented fp64 tier with a measured speedup; the consumer seam is documented.
+A consumer can depend on jht as a ducc0 replacement for its GPU/diff tier without
+any jht-side coupling.
 
 ---
 

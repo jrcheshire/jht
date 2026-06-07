@@ -1,6 +1,6 @@
 [project]
 name = "jht"
-version = "0.0.0"
+version = "0.1.0"
 description = "JAX-native spherical harmonic transforms (BK-regime first): GPU-capable, differentiable, dependency-controlled."
 authors = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
 maintainers = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
