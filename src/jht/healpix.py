@@ -53,6 +53,25 @@ def alm_column_base(m: int, lmax: int) -> int:
     return m * (2 * lmax + 1 - m) // 2 + m
 
 
+@lru_cache(maxsize=None)
+def alm_metric_weight(lmax: int) -> np.ndarray:
+    """Per-mode inner-product weight ``2 - delta_{m0}`` for the healpy ``m >= 0`` packing.
+
+    Only ``m >= 0`` is stored; a real field's ``m < 0`` half is implied by conjugate
+    symmetry, so the alm inner product / power carries weight 1 at ``m=0`` and 2 at
+    ``m>0``.  This is the metric ``G`` in which :func:`adjoint_synthesis` is the strict
+    transpose of :func:`synthesis` (``<S a, v>_map == <a, S^T v>_alm`` with this weight),
+    and it is the **differentiability convention bridge**: JAX's native VJP returns
+
+        ``jax.vjp(synthesis)(v) == G * conj(adjoint_synthesis(v))``
+
+    (exact for spin 0; for spin 2 also exact at ``m>0`` -- the ``m=0`` modes carry an
+    extra E/B-mixing phantom term, see ``docs/design.md``).  Shape ``(alm_size(lmax),)``.
+    """
+    ms = np.concatenate([np.full(lmax + 1 - m, m) for m in range(lmax + 1)])
+    return np.where(ms == 0, 1.0, 2.0)
+
+
 def _tri_dense_maps(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Index maps between healpy-triangular a_lm and the dense ``(M, lmax+1)`` grid.
 
@@ -186,12 +205,12 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
 
     def build_full(Ftot, Fsig):  # (M, t_half) x2 -> (M, nrings) full F
         F = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
-        F = F.at[:, :t_half].set(Ftot)
-        return F.at[:, south_tgt].set(sign_m * Fsig[:, south_src])
+        F = F.at[:, :t_half].set(Ftot, unique_indices=True)
+        return F.at[:, south_tgt].set(sign_m * Fsig[:, south_src], unique_indices=True)
 
     def fold_south(V):  # (M, nrings) -> Vn (north half), Vs = (-1)^m V_south
         Vs = jnp.zeros((lmax + 1, t_half), dtype=jnp.complex128)
-        Vs = Vs.at[:, south_src].set(V[:, south_tgt])
+        Vs = Vs.at[:, south_src].set(V[:, south_tgt], unique_indices=True)
         return V[:, :t_half], sign_m * Vs
 
     def tri_to_dense(alm):  # (K,) -> (M, lmax+1)
@@ -215,7 +234,7 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
                 D = D.at[:, g.k_plus].add(Cp.T)
                 D = D.at[:, g.k_minus].add(jnp.conj(Cp[1:].T))
                 vals = jnp.real(jnp.fft.ifft(D, axis=1) * g.N)  # (n_g, N)
-                out = out.at[g.pix_idx.ravel()].set(vals.ravel())
+                out = out.at[g.pix_idx.ravel()].set(vals.ravel(), unique_indices=True)
             return out
 
         @jax.jit
@@ -225,7 +244,7 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
                 fr = jnp.fft.fft(m[g.pix_idx], axis=1)  # (n_g, N)
                 ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
                 Vg = fr[:, g.g_plus] * ph  # (n_g, M)
-                V = V.at[:, g.ring_idx].set(Vg.T)
+                V = V.at[:, g.ring_idx].set(Vg.T, unique_indices=True)
             Vn, Vs = fold_south(V)
             return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs))
 
@@ -252,8 +271,8 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
             D = D.at[:, g.k_plus].add(Cp.T)
             D = D.at[:, g.k_minus].add(jnp.conj(Cm[1:].T))
             qu = jnp.fft.ifft(D, axis=1) * g.N  # (n_g, N)
-            Q = Q.at[g.pix_idx.ravel()].set(jnp.real(qu).ravel())
-            U = U.at[g.pix_idx.ravel()].set(jnp.imag(qu).ravel())
+            Q = Q.at[g.pix_idx.ravel()].set(jnp.real(qu).ravel(), unique_indices=True)
+            U = U.at[g.pix_idx.ravel()].set(jnp.imag(qu).ravel(), unique_indices=True)
         return jnp.stack([Q, U])
 
     @jax.jit
@@ -265,8 +284,8 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
             ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
             Fpb = W[:, g.g_plus] * ph
             Fmb = jnp.conj(W[:, g.g_minus]) * ph
-            Vp = Vp.at[:, g.ring_idx].set(Fpb.T)
-            Vm = Vm.at[:, g.ring_idx].set(Fmb.T)
+            Vp = Vp.at[:, g.ring_idx].set(Fpb.T, unique_indices=True)
+            Vm = Vm.at[:, g.ring_idx].set(Fmb.T, unique_indices=True)
         Vpn, Sp = fold_south(Vp)
         Vmn, Sm = fold_south(Vm)
         p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm)
