@@ -167,6 +167,41 @@ out until something demands it.
 
 ---
 
+## The ducc0-removal map (verified 2026-06-07)
+
+The reason Phase 4 is worth doing: it is the *last* piece needed to remove ducc0
+from bk-jax **entirely** — collapsing its C++/scikit-build/CUDA toolchain and the
+vendored-ducc-FFI license story to pure JAX. A grep of bk-jax `src/` (excluding
+the vendored `vendor/ducc/python/demos` tree) shows its **entire production ducc0
+surface is exactly two capabilities**:
+
+1. **On-grid HEALPix SHT, spin-0/2** (`aps/cl.py`, `coadd/signflip.py`,
+   `operators/mode_classifier.py`, the `sht/` backends). **jht already replaces
+   this** (matches ducc 1e-10/1e-15 on-grid).
+2. **Off-grid `synthesis_general` (+ adjoint)** (`tod/sim_sky.py`, `forward.py`,
+   `sim_signal.py`, `coadd/sim_aps.py`) — **the NUFFT, Phase 4**.
+
+There is **no third ducc capability** (no `rotate_alm` / `totalconvolve` /
+`wgridder` / standalone `nufft`/`fft`/`misc` in `src/`). So jht-on-grid + the
+Phase-4 NUFFT = total removal.
+
+**Wrinkle to pin before Phase 4:** the off-grid path calls `synthesis_general` at
+**spin 0, 1, 2, and 3** (`sim_sky.py` + `tod/deproj_templates.py` — the
+pointing-derivative / Taylor templates: ∂T→spin-1, QU second-derivatives→spin-3).
+So Phase 4 is **general-spin (0–3)**, at production ε=1e-10, **differentiable in
+the loc/pointing tangents**. Resolve "exact `synthesis_general` only (spin 0/2)"
+vs "keep the Taylor path (spin 0–3)" first — it is the biggest driver of Phase-4
+size. The aps/cl.py bandpower path is spin 0/2 only (unaffected).
+
+**Purity-tier note:** the cross-cutting "ducc stays for the ~1e-4 purity tier" was
+written conservatively *pre-Phase-1*. That purity lives in bk-jax's **bandpower
+operators** (apodization, B-purification) on top of the SHT, which jht now matches
+bit-for-bit on-grid — so the on-grid swap is very likely purity-safe (confirm with
+one bandpower-pipeline pass). The genuine remaining ducc-*accuracy* dependence is
+the **NUFFT ε**, not the on-grid SHT.
+
+---
+
 ## Cross-cutting constraints (bind every phase)
 
 - **Accuracy tiers:** ducc for purity-critical production (in bk-jax); jht for
