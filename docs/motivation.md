@@ -43,15 +43,26 @@ candidate. It was evaluated (the bk-jax "M0 SHT spike", 2026-05-03) and
 
 - Its **spin-2 HEALPix inverse has a structural precision defect**: measured
   3–28% error at production ℓ (L=257–769, nside 128–256), versus its own
-  documented ~1e-3. The failure pattern: at high ℓ only `m ≈ ℓ` single modes
-  pass; `m < ℓ` fail by O(10%). Spin-0 is machine-precision fine — the bug is
+  documented ~1e-3. The failure pattern: only `m ≈ ℓ` single modes pass;
+  `m < ℓ` fail by O(10%). Spin-0 is machine-precision fine — the bug is
   specific to the spin-±2 + HEALPix corner, i.e. **polarization**, which is the
   whole point for CMB B-modes.
+  - **2026-06 root-cause refinement** (literature dive for the jht spike): the
+    defect is in s2fft's spin-2 **analysis quadrature**, NOT the recursion. The
+    original "recursion underflow" hypothesis is refuted — s2fft *does* rescale
+    its Wigner-d recursion (`otf_recursions.py`), the failures appear at ℓ=8/16/32
+    and *shrink* with ℓ (35→28→22%), and they sit far below the ℓ≤1.5·nside
+    ceiling — none of which fit underflow. It fits an aliasing/polar-folding +
+    missing-ring-weights defect, with an unweighted Jacobi iteration that stalls
+    (upstream issue [#269], open/parked: "iterations don't fix it"). Implication
+    for jht: own the recursion (table-stakes) AND the weighted spin-2 analysis
+    (the real differentiator). See `docs/design.md`.
 - jax-healpy delegates to s2fft for SHTs, so it inherits the same bug — not a
   viable wrapper alternative.
-- As of 2026-06 s2fft is **still at v1.4.0 (12 Feb 2025)** — no release since
-  the spike. The relevant accuracy issues are triaged and parked by the
-  maintainers ("we don't have time"), and the PR queue is stagnant / broken.
+- As of 2026-06 s2fft is **still at v1.4.0 (12 Feb 2026)** — the evaluation
+  spike ran on v1.3.0, and the v1.3.0→v1.4.0 diff is CUDA/build-only (spin-2
+  accuracy byte-identical). The relevant accuracy issues are triaged and parked
+  by the maintainers ("we don't have time"), and the PR queue is stagnant.
 
 So: **don't depend on s2fft** (its broken corner is exactly our corner, and
 it's unmaintained on that front), and **don't fork it** either — inheriting a

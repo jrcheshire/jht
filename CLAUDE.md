@@ -57,11 +57,15 @@ harmonic transforms. It is excellent but:
 The leading JAX-native alternative, **s2fft**, was evaluated and rejected:
 its **spin-2 HEALPix inverse has a structural precision defect** (measured
 3–28% error at production ℓ, vs its own documented ~1e-3), and as of
-2026-06 it is **still at v1.4.0 (Feb 2025)** with the relevant issues triaged
-and parked ("no time") and a stagnant PR queue. **Do not depend on s2fft, and
-do not fork it** (owning a large codebase you find broken is the opposite of
-dependency control). Clean-room, *informed by* the published methods
-(Price & McEwen for the algorithm; libsharp for recursion stability), is the
+2026-06 it is **still at v1.4.0 (12 Feb 2026)** with the relevant issues triaged
+and parked ("no time") and a stagnant PR queue. (The 2026-05 evaluation spike
+ran on v1.3.0; the v1.3.0→v1.4.0 diff is CUDA/build-only, so the spin-2 accuracy
+is byte-identical — the date in the original record was wrong, the conclusion
+stands.) **Do not depend on s2fft, and do not fork it** (owning a large codebase
+you find broken is the opposite of dependency control). Clean-room, *informed
+by* the published methods (libsharp / Kostelec–Rockmore for the spin-2-safe
+ℓ-recursion; Price & McEwen for the JAX branch-free renorm *technique* only —
+explicitly NOT their m-recursion, which is the suspected defect home), is the
 control-aligned path.
 
 Crucially, the s2fft evaluation **validated the architecture**: a JAX-native
@@ -94,8 +98,13 @@ without an explicit discussion and sign-off.**
 - jht's first target is **reach the HEALPix floor with no structural defect**
   (i.e. spin-2 must NOT show s2fft's 3–28% — it must sit at ~1e-3 like spin-0),
   then close toward ducc by adding ring weights + iteration.
-- **Spin-2 is the gate.** It is exactly what s2fft got wrong; if jht's spin-2
-  HEALPix transform is correct to the floor, the project is viable.
+- **Spin-2 analysis is the gate.** It is exactly what s2fft got wrong — and the
+  2026-06 dive pinned the defect to the *analysis quadrature* (missing ring
+  weights + polar folding + a stalling unweighted iteration), NOT the recursion
+  (see the crux section). Gate the weighted spin-2 round-trip **per-(ℓ,m), below
+  the ℓ≤1.5·nside band-limit ceiling** so recursion / quadrature / ceiling errors
+  are never conflated; if it reaches the floor flat across all m (no s2fft-style
+  m<ℓ leakage), the project is viable.
 - Every transform lands with a parity test vs **both** healpy and ducc0
   (cross-checking conventions), at a documented tolerance. Log any residual
   mismatch (a `DISCREPANCIES.md`, mirroring bk-jax discipline) rather than
@@ -103,12 +112,29 @@ without an explicit discussion and sign-off.**
 
 ## The crux technical risk
 
-**Associated-Legendre / Wigner-d recursion numerical stability to ℓ_max~1000.**
-The classic underflow/overflow problem: naive recursions silently lose
-precision at high ℓ. The solved technique is libsharp-style log / "X-number"
-scaling. This is almost certainly the class of bug s2fft never fixed. It is the
-single thing most likely to make or break the spike — test it explicitly and
-early (Phase 0).
+Two distinct risks — and the 2026-06 literature dive **corrected which one is
+make-or-break** (full reasoning in `docs/design.md` and the session plan
+`~/.claude/plans/yeah-let-s-get-to-lovely-feather.md`):
+
+1. **Recursion stability to ℓ_max~1000 — necessary, but NOT s2fft's bug.**
+   Associated-Legendre / Wigner-d recursions underflow at high ℓ; the solved
+   technique is libsharp-style enhanced-exponent ("X-number") scaling. jht uses
+   the libsharp 3-term ℓ-recursion (Kostelec–Rockmore), in the increasing-ℓ
+   direction, with a **branch-free per-step log-renorm** — a *known, solved*
+   problem with a published spin-2≡spin-0 accuracy proof (libsharp §5.1.2).
+   This is **table-stakes, not the differentiator**: s2fft already rescales its
+   recursion and still fails spin-2, so getting the recursion right is necessary
+   but not sufficient.
+
+2. **Spin-2 HEALPix *analysis quadrature* — the actual make-or-break.** s2fft's
+   defect lives here, not in the recursion: its spin-2 single-mode errors appear
+   at ℓ=8/16/32 and *shrink* with ℓ (35→28→22%), spin-0 (identical recursion) is
+   machine-precision, and the failures sit far below the ℓ≤1.5·nside ceiling —
+   all incompatible with recursion underflow, all consistent with an
+   aliasing/folding + missing-weights defect in the spin-2 map2alm path. jht's
+   gate is the **weighted spin-2 round-trip, validated per-(ℓ,m) below the
+   band-limit ceiling**, so recursion / quadrature / ceiling errors are never
+   conflated. Test both risks explicitly and early (Phase 0).
 
 ## Conventions — pin and document these from day one
 

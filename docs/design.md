@@ -39,37 +39,84 @@ Design choices to make empirically:
 - **Real-aₗₘ vs complex-aₗₘ** internal representation.
 - Batching over realizations (vmap) for the sim/forecast use cases.
 
-Reference algorithms (study, don't copy a broken codebase): Price & McEwen for
-the recursion structure; libsharp / ducc for the stability scaling and ring
-weights.
+Reference algorithms (study, don't copy a broken codebase): **libsharp /
+Kostelec–Rockmore** for the recursion structure *and* the stability scaling
+(the 3-term ℓ-recursion + enhanced-exponent — see "The crux" below); ducc for
+ring weights + iteration; Price & McEwen only for the JAX branch-free renorm
+*technique* (NOT their m-recursion, the suspected s2fft-defect home).
 
-## The crux: recursion stability
+## The crux: two risks (recursion stability + spin-2 analysis quadrature)
 
-Associated-Legendre / Wigner-d recursions **underflow/overflow** at high ℓ; a
-naive `float64` recursion silently loses precision well before ℓ~1000. The
-solved technique is **logarithmic / "X-number" scaling** (carry a separate
-integer exponent alongside the mantissa, à la libsharp). This is almost
-certainly the class of bug behind s2fft's spin-2 failure pattern (clean only at
-m≈ℓ). **Test this explicitly and early** — single-mode sweeps across *all* m at
-several ℓ up to ~1000, not just round-trip totals which can mask localized
-leakage.
+The 2026-06 literature dive corrected the project's risk model. There are two
+distinct risks, and **the recursion is necessary but is not the make-or-break.**
 
-## Conventions to pin (and cross-validate vs healpy AND ducc)
+### Risk 1 — recursion stability to ℓ_max~1000 (necessary, table-stakes)
 
-Leaving these implicit is how `bk-jax` accumulated sign/convention bugs. Decide,
-document here, and test against both oracles:
+Associated-Legendre / Wigner-d recursions **underflow** at high ℓ (the seed
+`P̄_mm` carries `(sinθ)^m`, vanishingly small near the poles); a naive `float64`
+recursion loses precision well before ℓ~1000. **Chosen scheme:** the libsharp
+3-term recursion in ℓ at fixed (m, s) (Kostelec–Rockmore 2008; libsharp
+Eq. 10–11), run in the **increasing-ℓ** direction (libsharp §4.1 — stable that
+way, *contra* McEwen–Wiaux), stabilized by a **branch-free per-step log-renorm**
+(divide the running pair by `|d_ℓ|`, accumulate `log|d_ℓ|`, reconstruct with
+`exp`), as a fixed-trip `lax.scan` → `jit`/`vmap`/`grad`-clean. **Spin-0 is
+m′=0, spin-2 is m′=s=2 — one code path**, and libsharp §5.1.2 documents spin-2
+reaching the *same* accuracy as spin-0 with exactly this machinery. Borrow
+Price & McEwen's renorm *technique* (their §3.4, proven JAX-workable), NOT their
+m-recursion. Consult Prézeau & Reinecke 2010 (arXiv:1002.1050) for the exact
+enhanced-exponent algebra, and **verify the coefficients + seed elementwise vs
+`scipy.special`/healpy before trusting any round-trip.** Avoid the
+Risbo/Trapani–Navaza Δ(π/2)-matrix family (O(L²)/ℓ memory; double-precision
+instability cliff at L~2048) and threshold-*gated* rescaling (data-dependent
+branch, XLA-hostile).
 
-- **Polarization U-sign:** HEALPix-internal vs IAU. (bk-jax stores
-  HEALPix-internal, flips U at I/O boundaries.) Pick jht's internal convention
-  and state it loudly.
-- **Spin sign** (spin +2 vs −2; E/B sign).
-- **aₗₘ packing:** healpy triangular m-major layout, real vs complex, ℓ/m
-  ordering.
-- **Normalization:** orthonormal vs 4π. Match healpy/ducc and document the map.
+### Risk 2 — spin-2 HEALPix analysis quadrature (the actual make-or-break)
+
+This is where s2fft fails, and it is *not* the recursion: s2fft already
+rescales, spin-0 (the identical recursion) is machine-precision, and its spin-2
+single-mode errors appear at ℓ=8/16/32, *shrink* with ℓ (35→28→22%), and sit far
+below the ℓ≤1.5·nside ceiling — none of which fit underflow. The signature
+(`m≈ℓ` clean, `m<ℓ` fails O(10%)) is an **aliasing / polar-folding +
+missing-ring-weights** defect in the spin-2 map2alm, compounded by an unweighted
+Jacobi iteration that stalls (upstream issue #269: "iterations don't fix it").
+jht must own the **weighted spin-2 analysis** and validate it **per-(ℓ,m), below
+the ℓ≤1.5·nside ceiling**, so recursion / quadrature / band-ceiling errors are
+never conflated — single-mode sweeps across *all* m, never round-trip totals
+(which mask localized leakage). **Test both risks explicitly and early.**
+
+## Conventions (verified vs healpy 1.19.0 / ducc0 0.41.0 — pin in code)
+
+Leaving these implicit is how `bk-jax` accumulated sign/convention bugs. These
+were checked **empirically against both oracles** during the 2026-06 scoping
+(healpy ≡ ducc on the transform seam — no adapter needed; the only divergence is
+the IAU U-flip, which lives at the *application* layer):
+
+- **aₗₘ layout:** m-major triangular, only m≥0 stored (real maps → conjugate
+  symmetry `a_{ℓ,−m} = (−1)^m conj(a_{ℓ,m})`); index
+  `idx(ℓ,m) = m·(2·ℓmax+1−m)//2 + ℓ`; size `(ℓmax+1)(ℓmax+2)/2`; m=0 real.
+  (Matches `healpy.Alm`.)
+- **Normalization:** orthonormal `Y_ℓm` with the **Condon–Shortley** phase,
+  `map = Σ a_ℓm Y_ℓm`; **no** extra 4π / √(4π/(2ℓ+1)) factor (a constant map of
+  value c gives `a₀₀ = √(4π)·c` — verified; *not* the 4π-normalized convention
+  some geodesy libraries use).
+- **Spin-2 (E,B)↔(Q,U):** `(Q±iU) = Σ ₊₂/₋₂a_ℓm · ₊₂/₋₂Y_ℓm` with
+  `₊₂a = −(aE + i·aB)`, `₋₂a = −(aE − i·aB)`; inverse `aE = −(₂a+₋₂a)/2`,
+  `aB = i(₂a−₋₂a)/2`. healpy `alm2map(pol=True)` == ducc `synthesis(spin=2)` to
+  ~5e-13, same sign. *(Re-verify these signs against the HEALPix polarization
+  primer at implementation time — historically the dangerous ones.)*
+- **Polarization U-sign:** jht is **HEALPix-internal (COSMO)-native** (= healpy
+  default, = bk-jax's internal storage); `U_IAU = −U_HEALPix`. Flip only at an
+  explicit I/O boundary if a consumer asks for IAU.
 
 ## Differentiability
 
 - The on-grid SHT is **linear in aₗₘ**, so JVP/VJP are clean to register.
+- **The transpose of `synthesis` is `adjoint_synthesis = Sᵀ = Yᵀ` — the exact,
+  weight-free adjoint, NOT `map2alm`.** map2alm (`A = SᵀW`, quadrature-weighted
+  and iterative) is the *approximate inverse* — a different operator that equals
+  the adjoint only on exact-quadrature grids (never on HEALPix). The VJP/JVP of
+  synthesis is `Sᵀ`; keep the two distinct. (`Sᵀ` is also the only operator the
+  bk-jax seam needs — bk-jax keeps its weighted analysis on ducc.)
 - **Watch the JAX-VJP-convention vs strict-math-adjoint subtlety** that bit
   bk-jax: JAX's complex-VJP convention introduces a `2·conj(·)` factor on m>0
   modes relative to the strict math adjoint. Decide which convention each

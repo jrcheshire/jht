@@ -18,37 +18,60 @@ that before any real investment.
 
 ## Phase 0 — Feasibility spike (the go/no-go)
 
-**Goal:** answer "is owning a JAX SHT viable?" cheaply, before committing. A
-couple of days of focused work. Pure JAX, float64, validated against ducc0 and
-healpy. No packaging polish, no generality.
+**Goal:** answer "is owning a JAX SHT viable?" cheaply, before committing. Pure
+JAX, **float64**, CPU (Mac / bicep-dev), validated against ducc0 **and** healpy.
+No packaging polish, no generality. Structured as a **discriminating** spike: it
+*diagnoses* any failure (recursion vs quadrature vs band-ceiling) rather than
+just observing one — the seed's original single-gate design would have conflated
+all three.
 
-**Build:**
-- Minimal spin-0 HEALPix forward (map→aₗₘ) and inverse (aₗₘ→map) in pure JAX.
-- Minimal spin-2 HEALPix forward/inverse (the part s2fft gets wrong).
-- A recursion-stability probe: associated-Legendre / Wigner-d evaluated up to
-  ℓ_max ~ 1000 with explicit checks for underflow/precision loss.
+> **Corrected risk model (2026-06 dive).** The make-or-break is the **spin-2
+> analysis quadrature**, not the recursion. s2fft already rescales its recursion
+> yet still fails spin-2 (errors at ℓ=8/16/32, *shrinking* with ℓ, below the
+> ceiling; spin-0 fine). So Phase 0 tests the recursion *in isolation*
+> (table-stakes) AND the weighted spin-2 round-trip *below the ℓ≤1.5·nside
+> ceiling, per-(ℓ,m)* (the real gate). See `docs/design.md` "The crux".
 
-**Hard gates (a-priori — set the numbers before running, do not move them after):**
-1. **Spin-0** round-trip and vs-healpy/ducc on a band-limited map: reaches the
-   HEALPix floor (≲1e-3, ideally ~machine with weights+iteration on band-limited
-   input).
-2. **Spin-2** round-trip and vs-ducc on a band-limited Q/U map: ≲1e-3 with **no
-   structural defect** — explicitly NOT s2fft's 3–28%. This is the make-or-break
-   gate.
-3. **Recursion stability:** precision does not degrade pathologically as ℓ→1000
-   (single-mode sweeps stay clean across all m, not just m≈ℓ — the failure
-   pattern s2fft showed).
-4. **GPU sanity:** rough GPU-vs-ducc-CPU timing confirms there is actually a win
-   to chase (jht on CPU is expected to be *slower* than ducc; the win is GPU).
+**Build (three layers):**
+- **L0 — recursion in isolation:** normalized `P̄_ℓm` (spin-0) and `ₛλ_ℓm`
+  (spin-2) via the libsharp ℓ-recursion + branch-free log-renorm; validated
+  *elementwise* vs `scipy.special`/healpy, all m, ℓ up to ~1000, both spins,
+  incl. polar θ.
+- **L1 — synthesis + exact adjoint:** `synthesis` (aₗₘ→map) and
+  `adjoint_synthesis = Sᵀ` (map→aₗₘ, unweighted), spin-0 and spin-2, with HEALPix
+  ring geometry + polar folding. (This pair is the bk-jax-tier capability.)
+- **L2 — weighted spin-2 round-trip:** bare analysis `A₀=(4π/N)·Sᵀ` + Jacobi
+  iteration; per-(ℓ,m) round-trip **below the ℓ≤1.5·nside ceiling**, single-mode
+  sweeps across all m.
+
+**Hard gates (a-priori — set here, before running; not relaxed without sign-off):**
+1. **Gate R (recursion isolation):** elementwise rel error ≤ **1e-12** across all
+   m at ℓ∈{2,8,16,32,128,256,512,768,1000}, both spins, incl. polar θ.
+2. **Gate S-synth:** jht `synthesis` vs healpy `alm2map` **and** ducc
+   `synthesis`, band-limited input (ℓmax≤1.5·nside), both spins: ≤ **1e-10**.
+3. **Gate adj:** inner-product identity
+   `|⟨S a, m⟩ − ⟨a, Sᵀ m⟩| / |⟨S a, m⟩|` ≤ **1e-10**.
+4. **Gate Spin2-floor (make-or-break):** single-mode spin-2 round-trip below the
+   ceiling reaches the bare floor ≤ **1e-3** flat across **all m** (explicitly
+   NOT s2fft's m<ℓ O(10%) leakage); with ≤5 Jacobi iters on band-limited input
+   → ≤ **1e-4**. Reproduce s2fft's failing sweep (ℓ=8,16,32) and show jht flat.
+5. **Gate Spin0-floor (control):** same structure, spin-0 ≤ 1e-3 bare → much
+   better with iteration.
+
+**GPU gate — DEFERRED to Phase 3.** Phase-0 accuracy needs float64, which
+JAX-metal does not reliably support; a rough jht-GPU-vs-ducc-CPU timing is a
+later Cannon spike. Go/no-go is **not** blocked on GPU access.
 
 **Exit criterion:**
-- All gates pass → proceed to Phase 1 (the bet holds).
-- Spin-2 floor unreachable or recursion fights us → **document it and stop**;
-  bk-jax stays on ducc, and we've spent ~2 days, not 2 months, to learn it.
-  (A narrower fallback — e.g. lower ℓ_max ceiling — can be considered here.)
+- Gates R, S-synth, adj, Spin2-floor, Spin0-floor green → proceed to Phase 1.
+- Weighted spin-2 round-trip can't reach the floor below the ceiling *even with*
+  correct recursion + bare weights + iteration → **document and stop** (the bet
+  fails). The layered structure guarantees the stop is *diagnosed*. (A narrower
+  fallback — lower ℓ_max ceiling — can be considered here.)
 
-**Deliverable:** a spike script + a short findings note (gate results, the
-recursion approach that worked, GPU timing), and a clear go/no-go.
+**Deliverable:** the spike script(s) + the pytest gates + a short findings note
+(`docs/findings_phase0.md`: gate results, the recursion approach that held, the
+discriminating evidence on the s2fft root cause), and a clear go/no-go.
 
 ---
 
@@ -148,3 +171,12 @@ out until something demands it.
 Repository scaffolded only: `git init`, `CLAUDE.md`, this roadmap, `docs/`
 notes, minimal `pyproject.toml` + package stub. **No transform code.** The
 development session picks up at **Phase 0**.
+
+**Scoping pass (same day, after a 4-agent literature dive + primary-source
+verification):** corrected the risk model (recursion → spin-2 analysis
+quadrature; see the Phase-0 box above and `docs/design.md`), chose the recursion
+scheme (libsharp ℓ-recursion + branch-free log-renorm), pinned + verified the
+healpy/ducc conventions, and locked three decisions: Phase-0 = a discriminating
+3-layer spike; first useful accuracy = bare floor + iteration (no weight files);
+GPU timing deferred to Phase 3. Full plan:
+`~/.claude/plans/yeah-let-s-get-to-lovely-feather.md`.
