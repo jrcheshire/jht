@@ -89,9 +89,10 @@ def test_adjoint_contract_matches_per_m(spin, lmax):
     theta = np.linspace(0.01, np.pi - 0.01, 31)
     x = np.cos(theta)
     lam = _ref_lambda_dense(x, spin, lmax)
-    V = (rng.standard_normal((lmax + 1, x.shape[0])) + 1j * rng.standard_normal(
-        (lmax + 1, x.shape[0])
-    )) / 2
+    V = (
+        rng.standard_normal((lmax + 1, x.shape[0]))
+        + 1j * rng.standard_normal((lmax + 1, x.shape[0]))
+    ) / 2
     plan = build_recursion_plan(x, spin, lmax)
     b = np.asarray(adjoint_contract(plan, x, V))
     b_ref = np.einsum("mlt,mt->ml", lam, V)

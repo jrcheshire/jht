@@ -32,7 +32,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._recursion import adjoint_contract, build_recursion_plan, synth_contract
+from ._recursion import (
+    adjoint_contract_eo,
+    adjoint_contract_spin2_ns,
+    build_recursion_plan,
+    synth_contract_eo,
+    synth_contract_spin2_ns,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,7 +163,6 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
     geo = RingInfo(nside)
     npix = geo.npix
-    x = jnp.asarray(geo.z)
     groups = _ring_groups(geo, lmax)
     gather, valid, scatter_flat = _tri_dense_maps(lmax)
     gather_j = jnp.asarray(gather)
@@ -170,6 +175,25 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     phase = jnp.asarray(np.exp(1j * m_pos[:, None] * geo.phi0[None, :]))  # (M, nrings)
     conj_phase = jnp.conj(phase)
 
+    # --- North/South symmetry geometry (recursion runs on the north half + equator) ---
+    # rings 0..2*nside-1 are north cap + equator; ring (4*nside-2-r) is the south
+    # reflection of north ring r (r = 0..2*nside-2); the equator (r=2*nside-1) is self.
+    t_half = 2 * nside
+    x_half = jnp.asarray(geo.z[:t_half])
+    south_src = np.arange(t_half - 1)  # north non-equator half indices
+    south_tgt = 4 * nside - 2 - south_src  # their south full-ring indices
+    sign_m = jnp.asarray(((-1.0) ** np.arange(lmax + 1))[:, None])  # (M, 1)
+
+    def build_full(Ftot, Fsig):  # (M, t_half) x2 -> (M, nrings) full F
+        F = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
+        F = F.at[:, :t_half].set(Ftot)
+        return F.at[:, south_tgt].set(sign_m * Fsig[:, south_src])
+
+    def fold_south(V):  # (M, nrings) -> Vn (north half), Vs = (-1)^m V_south
+        Vs = jnp.zeros((lmax + 1, t_half), dtype=jnp.complex128)
+        Vs = Vs.at[:, south_src].set(V[:, south_tgt])
+        return V[:, :t_half], sign_m * Vs
+
     def tri_to_dense(alm):  # (K,) -> (M, lmax+1)
         return jnp.where(valid_j, alm[gather_j], 0.0 + 0.0j)
 
@@ -178,12 +202,12 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         return out.at[scatter_j].set(b_dense.ravel(), mode="drop")
 
     if spin == 0:
-        plan = build_recursion_plan(geo.z, 0, lmax)
+        plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
 
         @jax.jit
         def synth(alm):
-            F = synth_contract(plan, x, tri_to_dense(alm))  # (M, nrings)
-            G = F * phase
+            Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm))
+            G = build_full(Ftot, Fsig) * phase  # (M, nrings)
             out = jnp.zeros(npix, dtype=jnp.float64)
             for g in groups:
                 Cp = G[:, g.ring_idx]  # (M, n_g)
@@ -202,19 +226,23 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
                 ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
                 Vg = fr[:, g.g_plus] * ph  # (n_g, M)
                 V = V.at[:, g.ring_idx].set(Vg.T)
-            return dense_to_tri(adjoint_contract(plan, x, V))
+            Vn, Vs = fold_south(V)
+            return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs))
 
         return _Prepared(synth, adj)
 
-    plan_p = build_recursion_plan(geo.z, 2, lmax)
-    plan_m = build_recursion_plan(geo.z, -2, lmax)
+    plan_p = build_recursion_plan(geo.z[:t_half], 2, lmax)
+    plan_m = build_recursion_plan(geo.z[:t_half], -2, lmax)
 
     @jax.jit
     def synth2(alm2d):  # (2, K) -> (2, npix)
         aE = tri_to_dense(alm2d[0])
         aB = tri_to_dense(alm2d[1])
-        Fp = synth_contract(plan_p, x, -(aE + 1j * aB)) * phase
-        Fm = synth_contract(plan_m, x, -(aE - 1j * aB)) * phase
+        FpN, FpS, FmN, FmS = synth_contract_spin2_ns(
+            plan_p, plan_m, x_half, -(aE + 1j * aB), -(aE - 1j * aB)
+        )
+        Fp = build_full(FpN, FpS) * phase
+        Fm = build_full(FmN, FmS) * phase
         Q = jnp.zeros(npix, dtype=jnp.float64)
         U = jnp.zeros(npix, dtype=jnp.float64)
         for g in groups:
@@ -239,8 +267,9 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
             Fmb = jnp.conj(W[:, g.g_minus]) * ph
             Vp = Vp.at[:, g.ring_idx].set(Fpb.T)
             Vm = Vm.at[:, g.ring_idx].set(Fmb.T)
-        p2 = adjoint_contract(plan_p, x, Vp)  # (M, lmax+1)
-        m2 = adjoint_contract(plan_m, x, Vm)
+        Vpn, Sp = fold_south(Vp)
+        Vmn, Sm = fold_south(Vm)
+        p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm)
         aE = 0.5 * (-p2 - m2)
         aB = 0.5 * (1j * p2 - 1j * m2)
         return jnp.stack([dense_to_tri(aE), dense_to_tri(aB)])

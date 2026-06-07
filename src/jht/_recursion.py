@@ -291,9 +291,10 @@ def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
             seed_log[m] = const if m == 0 else const + m * log_sin
     else:
         ell = np.arange(L1, dtype=np.float64)
-        pref = (((-1.0) ** np.arange(M))[None, :]) * np.sqrt((2.0 * ell + 1.0) / (4.0 * np.pi))[
-            :, None
-        ]
+        pref = (
+            (((-1.0) ** np.arange(M))[None, :])
+            * np.sqrt((2.0 * ell + 1.0) / (4.0 * np.pi))[:, None]
+        )
         xj = jnp.asarray(x)
         for m in range(M):
             lm = int(lmin[m])
@@ -395,3 +396,152 @@ def adjoint_contract(plan: RecursionPlan, x, V) -> jax.Array:
     z = jnp.zeros((M, T), dtype=jnp.float64)
     _, b = jax.lax.scan(body, (z, z, z), (A, B, C, pref, is_seed, is_active))  # b: (L1, M)
     return b.T
+
+
+# --------------------------------------------------------------------------- #
+# North/South (equatorial) symmetry.
+#
+# HEALPix rings come in reflected pairs (z, -z) with equal length and phi0.  The
+# recursion -- ~98% of the transform cost -- need only run over the north half +
+# equator (~2.nside colatitudes) because of the reflection parity
+#
+#     lambda^s_{l,m}(pi - theta) = (-1)^{l+m} lambda^{-s}_{l,m}(theta).
+#
+# spin-0 (s = -s): one half-grid scan gives both hemispheres from a "total" and a
+# "signed" accumulator (F_north = sum_l c, F_south = (-1)^m sum_l (-1)^l c).  The
+# +-2 coupling means spin-2 needs the d^{+2} and d^{-2} recursions advanced
+# *together* over the half grid (still one half-grid pass each -> the 2x win), but
+# with the south hemisphere of each channel built from the *other* spin's column.
+# --------------------------------------------------------------------------- #
+def synth_contract_eo(plan: RecursionPlan, x, alm_dense):
+    """Half-grid synthesis (spin-0): returns ``(F_total, F_signed)`` of shape ``(M, T)``.
+
+    ``F_total = sum_l alm pref lambda``  and  ``F_signed = sum_l (-1)^l alm pref lambda``
+    over the (north-half) colatitudes ``x``.  The caller forms
+    ``F_north = F_total`` and ``F_south = (-1)^m F_signed``.
+    """
+    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    x = jnp.asarray(x)
+    M, T = seed_log.shape
+    alm_T = jnp.asarray(alm_dense).T  # (L1, M)
+    par = jnp.asarray(np.where(np.arange(plan.lmax + 1) % 2 == 0, 1.0, -1.0))
+
+    def body(carry, xs):
+        p, q, s, Ftot, Fsig = carry
+        A_c, B_c, C_c, pref_c, alm_c, seed_c, act_c, par_c = xs
+        new_p, new_q, new_s, lam = _rec_step(
+            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
+        )
+        c = (alm_c * pref_c)[:, None] * lam
+        return (new_p, new_q, new_s, Ftot + c, Fsig + par_c * c), None
+
+    z = jnp.zeros((M, T), dtype=jnp.float64)
+    zc = jnp.zeros((M, T), dtype=jnp.complex128)
+    init = (z, z, z, zc, zc)
+    (_, _, _, Ftot, Fsig), _ = jax.lax.scan(
+        body, init, (A, B, C, pref, alm_T, is_seed, is_active, par)
+    )
+    return Ftot, Fsig
+
+
+def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs):
+    """Half-grid adjoint (spin-0): ``b_{l,m} = sum_theta lambda (Vn + (-1)^l Vs)``.
+
+    ``Vn`` is the north-half per-m data, ``Vs = (-1)^m V_south`` (the reflected
+    south data with the m-parity folded in; equator column zero).  Returns the
+    dense ``(M, lmax+1)`` coefficients.
+    """
+    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    x = jnp.asarray(x)
+    Vn = jnp.asarray(Vn)
+    Vs = jnp.asarray(Vs)
+    M, T = seed_log.shape
+    par = jnp.asarray(np.where(np.arange(plan.lmax + 1) % 2 == 0, 1.0, -1.0))
+
+    def body(carry, xs):
+        p, q, s = carry
+        A_c, B_c, C_c, pref_c, seed_c, act_c, par_c = xs
+        new_p, new_q, new_s, lam = _rec_step(
+            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
+        )
+        b_col = pref_c * (jnp.sum(lam * Vn, axis=1) + par_c * jnp.sum(lam * Vs, axis=1))
+        return (new_p, new_q, new_s), b_col
+
+    z = jnp.zeros((M, T), dtype=jnp.float64)
+    _, b = jax.lax.scan(body, (z, z, z), (A, B, C, pref, is_seed, is_active, par))
+    return b.T
+
+
+def _two_state_arrays(plan_p: RecursionPlan, plan_m: RecursionPlan, x):
+    """jnp arrays to drive the d^{+2} and d^{-2} recursions together over the half grid.
+
+    ``plan_p`` / ``plan_m`` share ``pref / is_seed / is_active`` (same |spin|) and
+    differ only in the recurrence coeffs and the seed.
+    """
+    Ap, Bp, Cp, pref, ssp, slp, is_seed, is_active = _plan_arrays(plan_p)
+    Am, Bm, Cm, _pf, ssm, slm, _is, _ia = _plan_arrays(plan_m)
+    par = jnp.asarray(np.where(np.arange(plan_p.lmax + 1) % 2 == 0, 1.0, -1.0))
+    return Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, jnp.asarray(x)
+
+
+def synth_contract_spin2_ns(plan_p, plan_m, x, bp_dense, bm_dense):
+    """Half-grid spin-2 synthesis.  Returns ``(Fp_north, Fp_south, Fm_north, Fm_south)``.
+
+    ``bp = -(aE + i aB)``, ``bm = -(aE - i aB)`` (dense ``(M, lmax+1)``).  The
+    south halves still carry the ``(-1)^m`` factor for the caller to apply.
+    """
+    Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, x = (
+        _two_state_arrays(plan_p, plan_m, x)
+    )
+    M, T = slp.shape
+    bpT = jnp.asarray(bp_dense).T
+    bmT = jnp.asarray(bm_dense).T
+
+    def body(carry, xs):
+        pp, qp, sp, pm, qm, sm, FpN, FpS, FmN, FmS = carry
+        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, pref_c, bp_c, bm_c, sd_c, ac_c, par_c = xs
+        pp, qp, sp, lam_p = _rec_step(pp, qp, sp, Ap_c, Bp_c, Cp_c, sd_c, ac_c, x, ssp, slp)
+        pm, qm, sm, lam_m = _rec_step(pm, qm, sm, Am_c, Bm_c, Cm_c, sd_c, ac_c, x, ssm, slm)
+        cp = (bp_c * pref_c)[:, None]
+        cm = (bm_c * pref_c)[:, None]
+        FpN = FpN + cp * lam_p
+        FpS = FpS + par_c * cp * lam_m  # south of +channel uses the -2 column
+        FmN = FmN + cm * lam_m
+        FmS = FmS + par_c * cm * lam_p  # south of -channel uses the +2 column
+        return (pp, qp, sp, pm, qm, sm, FpN, FpS, FmN, FmS), None
+
+    z = jnp.zeros((M, T), dtype=jnp.float64)
+    zc = jnp.zeros((M, T), dtype=jnp.complex128)
+    init = (z, z, z, z, z, z, zc, zc, zc, zc)
+    xs = (Ap, Bp, Cp, Am, Bm, Cm, pref, bpT, bmT, is_seed, is_active, par)
+    (_, _, _, _, _, _, FpN, FpS, FmN, FmS), _ = jax.lax.scan(body, init, xs)
+    return FpN, FpS, FmN, FmS
+
+
+def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm):
+    """Half-grid spin-2 adjoint.  Returns ``(p2, m2)`` dense ``(M, lmax+1)``.
+
+    ``Vpn / Vmn`` are the north-half +/- channel data; ``Sp = (-1)^m Vp_south``,
+    ``Sm = (-1)^m Vm_south`` (reflected south with the m-parity folded in).
+    ``p2`` contracts the +2 column with the north + the -2 column with the south;
+    ``m2`` the mirror.
+    """
+    Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, x = (
+        _two_state_arrays(plan_p, plan_m, x)
+    )
+    M, T = slp.shape
+    Vpn, Sp, Vmn, Sm = (jnp.asarray(a) for a in (Vpn, Sp, Vmn, Sm))
+
+    def body(carry, xs):
+        pp, qp, sp, pm, qm, sm = carry
+        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, pref_c, sd_c, ac_c, par_c = xs
+        pp, qp, sp, lam_p = _rec_step(pp, qp, sp, Ap_c, Bp_c, Cp_c, sd_c, ac_c, x, ssp, slp)
+        pm, qm, sm, lam_m = _rec_step(pm, qm, sm, Am_c, Bm_c, Cm_c, sd_c, ac_c, x, ssm, slm)
+        p2 = pref_c * (jnp.sum(lam_p * Vpn, axis=1) + par_c * jnp.sum(lam_m * Sp, axis=1))
+        m2 = pref_c * (jnp.sum(lam_m * Vmn, axis=1) + par_c * jnp.sum(lam_p * Sm, axis=1))
+        return (pp, qp, sp, pm, qm, sm), (p2, m2)
+
+    z = jnp.zeros((M, T), dtype=jnp.float64)
+    xs = (Ap, Bp, Cp, Am, Bm, Cm, pref, is_seed, is_active, par)
+    _, (p2, m2) = jax.lax.scan(body, (z, z, z, z, z, z), xs)
+    return p2.T, m2.T
