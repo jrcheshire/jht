@@ -37,7 +37,15 @@ from .healpix import (
     alm_size,
     synthesis,
 )
-from .masked import alm_to_real, deconvolve, n_dof, pseudo_alm, real_to_alm
+from .masked import (
+    alm_to_real,
+    constrained_realization,
+    deconvolve,
+    n_dof,
+    pseudo_alm,
+    real_to_alm,
+    wiener,
+)
 from .weights import pixel_weights, ring_weights
 
 __version__ = "0.1.0"
@@ -56,6 +64,8 @@ __all__ = [
     # partial-sky / masked
     "pseudo_alm",  # masked pseudo-a_lm (zero-fill)
     "deconvolve",  # cut-sky CG deconvolution
+    "wiener",  # Wiener filter / MUSE inner solve (Cl prior + N^-1)
+    "constrained_realization",  # posterior draw (constrained realization)
     # differentiable (real-DOF) interface
     "synthesis_real",  # S o T^-1 : R^n -> map
     "analysis_real",  # T o map2alm : map -> R^n

@@ -25,8 +25,12 @@ within that subspace, and `reg>0` (Tikhonov) bounds it.
   m<ℓ defect — that was ruled out in Phase 0); the spin-2-specific limitation is
   only the ambiguous-mode subspace at aggressive cuts.
 - **Mitigation / scope:** use `reg>0` to stabilise, restrict the recovered band,
-  or treat the ambiguous subspace explicitly — the latter belongs to the Wiener
-  / MUSE inner-solve phase, not this rung. See `docs/masked.md`.
+  or — now implemented — bound the ambiguous subspace with a signal prior via
+  `jht.masked.wiener` (the Cℓ-informed generalization of `reg`; the MUSE
+  inner-solve tier), with `constrained_realization` for posterior draws. The
+  operator and recovery are unchanged; the prior simply gives the unconstrained
+  subspace a principled, finite answer instead of the min-norm CG one. See
+  `docs/masked.md`.
 
 ## Differentiability: `jax.linear_transpose` / forward-mode of the raw kernels (limitation, not a defect)
 

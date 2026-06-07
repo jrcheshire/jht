@@ -30,10 +30,11 @@ place of ducc0* for its GPU/differentiable tier, but nothing below is BK-specifi
 | `map → aₗₘ`, **exact transpose** `Sᵀ` | `jht.adjoint_synthesis(m, nside, lmax, spin)` | the *unweighted* adjoint — the operator a matrix-free solver / VJP needs, **not** an inverse |
 | `map → aₗₘ`, approximate **inverse** | `jht.map2alm(m, …, niter=3)` | ring weights + Jacobi iteration (the healpy-`map2alm` analogue) |
 | masked analysis | `jht.pseudo_alm`, `jht.deconvolve` | zero-fill pseudo-aₗₘ; cut-sky CG deconvolution |
+| Wiener / MUSE inner solve | `jht.wiener`, `jht.constrained_realization` | `(SᵀN⁻¹S + C⁻¹)⁻¹SᵀN⁻¹m` (per-pixel `N⁻¹` + Cℓ prior); posterior draws |
 
 `adjoint_synthesis` is the strict transpose of `synthesis` in the
 `(2 − δ_{m0})`-weighted aₗₘ inner product — this is the operator to drop into a
-CG/Wiener solve (it is exactly what `jht.deconvolve` builds on).
+CG/Wiener solve (it is exactly what `jht.deconvolve` and `jht.wiener` build on).
 
 ## The gradient path
 

@@ -21,6 +21,7 @@ from jht import analysis, diff, healpix, masked, weights  # noqa: E402
 EXPECTED = {
     "synthesis", "adjoint_synthesis", "bare_analysis", "map2alm",
     "ring_weights", "pixel_weights", "pseudo_alm", "deconvolve",
+    "wiener", "constrained_realization",
     "synthesis_real", "analysis_real", "bandpower",
     "alm_to_real", "real_to_alm", "n_dof", "alm_size", "alm_metric_weight",
 }
@@ -50,6 +51,8 @@ def test_reexports_are_the_real_objects():
     assert jht.pixel_weights is weights.pixel_weights
     assert jht.pseudo_alm is masked.pseudo_alm
     assert jht.deconvolve is masked.deconvolve
+    assert jht.wiener is masked.wiener
+    assert jht.constrained_realization is masked.constrained_realization
     assert jht.synthesis_real is diff.synthesis_real
     assert jht.analysis_real is diff.analysis_real
     assert jht.bandpower is diff.bandpower
