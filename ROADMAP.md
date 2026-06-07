@@ -88,6 +88,8 @@ discriminating evidence on the s2fft root cause), and a clear go/no-go.
   aₗₘ layout, normalization — with cross-validation against both healpy and ducc.
 - Full vs-ducc/healpy **test matrix** across nside / ℓ_max / spin.
 - Partial-sky (masked) analysis path, since that's what BK actually uses.
+  *(Done — `jht.masked`: pseudo-a_lm + cut-sky CG deconvolution; see
+  `docs/masked.md`, `tests/test_masked.py`.)*
 
 **Exit criterion:** the test matrix is green at documented tolerances; a
 `DISCREPANCIES.md` captures any residual with its cause.

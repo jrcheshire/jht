@@ -109,6 +109,7 @@ it); runtime is unaffected (FFTs are ≲10 %).
 - **`map2alm` recomputes the recursion** each of its 7 passes (the memory-safe
   on-the-fly choice). A memory-gated cached-λ fast path for small nside is an
   easy future optimization.
-- Ring quadrature weights, partial-sky, and the full nside/lmax/spin accuracy
-  matrix are the next Phase-1 accuracy rungs (out of scope for this performance
-  pass); differentiability is Phase 2; GPU is Phase 3.
+- Ring quadrature weights, the full nside/lmax/spin accuracy matrix, and
+  partial-sky (masked) analysis were the Phase-1 accuracy rungs (done — see
+  `docs/accuracy.md`, `docs/masked.md`); differentiability is Phase 2; GPU is
+  Phase 3.

@@ -94,6 +94,7 @@ committed a-priori contract is **weighted + niter=3 ≤ 1e-4**. See
 
 ## Next (Phase 1)
 Harden the core: precompute/vectorize the transforms; ring weights + iteration to
-close toward ducc; full nside/ℓmax/spin test matrix; partial-sky path. Then
-Phase 2 (differentiability: the two transposes, gradient identities) and Phase 3
-(GPU + the `BK_JAX_SHT_BACKEND=jht` backend).
+close toward ducc; full nside/ℓmax/spin test matrix; partial-sky path *(all done —
+see `docs/accuracy.md`, `docs/masked.md`)*. Then Phase 2 (differentiability: the
+two transposes, gradient identities) and Phase 3 (GPU + the
+`BK_JAX_SHT_BACKEND=jht` backend).

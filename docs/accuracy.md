@@ -96,5 +96,6 @@ VJP) is **not** weighted and is unchanged by this work.
   the weight solve at `Lw = 2·nside` stays well-conditioned via `lstsq`. Behavior
   at nside=2048 is a documented follow-up, not a blocker (the weights are static
   numpy, free to use higher precision if ever needed).
-- **Partial-sky (masked) analysis** is deferred to its own session; this contract
-  is full-sky.
+- **Partial-sky (masked) analysis** has its own contract and document,
+  `docs/masked.md` (the masked pseudo-a_lm + the cut-sky CG deconvolution); this
+  contract is full-sky.
