@@ -1,23 +1,32 @@
 # jht — Technical design notes
 
-Working design notes for the JAX-native SHT. Written 2026-06-06 as scaffolding;
-this is the place to record algorithm choices, conventions, and accuracy
-decisions as they are made. Nothing here is implemented yet.
+Working design notes for the JAX-native SHT. This records algorithm choices,
+conventions, and accuracy decisions. Phase 0 (feasibility) and Phase 1
+(performance + accuracy) are implemented; the measured accuracy contract lives
+in `docs/accuracy.md` and the performance characterization in
+`docs/performance.md`.
 
 ## Accuracy tiers (the contract)
 
 HEALPix has **no sampling theorem**, so a HEALPix SHT is intrinsically
 approximate. Three accuracy regimes matter:
 
-| Tier | What it is | Use |
-|---|---|---|
-| Bare floor (~1e-3) | Direct quadrature, no ring weights | Not good enough alone |
-| + ring weights | Full HEALPix ring quadrature weights | Closes toward ducc |
-| + Jacobi iteration | `map2alm`-style iterative refinement on band-limited input | ducc-class (~1e-4+) |
+| Tier | What it is | Measured (broadband) | Use |
+|---|---|---|---|
+| Bare floor | Direct quadrature, uniform `4π/Npix` | ~2–17e-3 | Not good enough alone |
+| + ring weights | jht's own min-norm ring weights (`jht.weights`) | bare ~2–12e-4 | Closes toward ducc |
+| + Jacobi iteration | `map2alm` iterative refinement, band-limited | **~1e-13** | ducc-class |
 
-- **jht's first target:** reach the *bare floor with no structural defect* —
-  spin-2 must sit at ~1e-3 like spin-0, NOT s2fft's 3–28%.
-- **Then** add ring weights + iteration to approach ducc on band-limited maps.
+- **Phase-0 target (met):** reach the *bare floor with no structural defect* —
+  spin-2 sits at ~1e-3 like spin-0, NOT s2fft's 3–28%.
+- **Phase-1 accuracy (met):** ring weights + iteration reach machine precision on
+  band-limited maps, matching `healpy.map2alm(use_weights=True)`. The **committed
+  a-priori contract is weighted + niter=3 ≤ 1e-4** (measured ~1e-13, ~9 orders of
+  headroom). Full numbers + the ring-weight algorithm: `docs/accuracy.md`.
+- **Ring weights are jht's own**, not HEALPix's shipped `weight_ring` array
+  (different undocumented solver; reproducing it would also break the no-files
+  contract). They are the minimum-norm per-ring correction making the m=0
+  quadrature exact to `Lw = 2·nside`; validated end-to-end, not by array match.
 - ducc remains the production oracle in bk-jax; jht serves the GPU/diff tier
   where ~1e-3 is acceptable. Tolerances are a-priori and not relaxed without
   sign-off (standing rule).

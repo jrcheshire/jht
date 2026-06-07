@@ -59,6 +59,12 @@ the same 2.9e-3**, so the discriminating criterion (spin-2 ≡ spin-0, no
 structural defect) is met decisively. Iterated accuracy (≤1e-4 gate) is exceeded
 by ~10 orders. The floor closes further with ring weights (deferred rung).
 
+**Resolved (Phase-1 accuracy, 2026-06-07).** The ~2–3e-3 bare carryover is now the
+documented *unweighted baseline*; jht's own pure-numpy ring weights + iteration
+reach ~1e-13 (machine precision) on band-limited maps, matching healpy. The
+committed a-priori contract is **weighted + niter=3 ≤ 1e-4**. See
+`docs/accuracy.md`.
+
 ---
 
 ## What was built (committed)
