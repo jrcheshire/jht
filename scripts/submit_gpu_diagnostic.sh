@@ -19,10 +19,11 @@
 # easily; the defaults below are a middle ground -- bump --time AND MAX_WALL
 # together if you want the full ladder to finish on a slow MIG.
 #
-# PRE-INSTALL ONCE on a login node before submitting (the first solve of the CUDA
-# env is slow and downloads packages; do not burn slot time on it, and compute
-# nodes may lack network):
-#     cd ~/jht && pixi install -e gpu
+# PRE-INSTALL ONCE on a login node before submitting (downloads + links the CUDA
+# packages; compute nodes may lack network, so stage it on a login node). Login
+# nodes have no GPU, so mock the CUDA driver virtual package (__cuda) for the solve
+# -- the real driver is detected at runtime on the compute node:
+#     cd ~/jht && CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
 # Usage (from the repo root on Cannon):
 #     cd ~/jht
@@ -81,7 +82,10 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader ||
 echo "=========================="
 
 OUT="runs/gpu-diag/diag_${SLURM_JOB_ID:-local}.jsonl"
+# --frozen: run the login-node-preinstalled env as-is -- no lock re-check, no
+# network (compute nodes may have none). The compute node has a real GPU, so the
+# __cuda check passes here without the override needed on the login node.
 # shellcheck disable=SC2086  # DIAG_ARGS is intentionally word-split into flags
-pixi run -e gpu python scripts/gpu_diagnostic.py --max-wall "${MAX_WALL}" --out "${OUT}" ${DIAG_ARGS}
+pixi run --frozen -e gpu python scripts/gpu_diagnostic.py --max-wall "${MAX_WALL}" --out "${OUT}" ${DIAG_ARGS}
 
 echo "=== done $(date) -> ${OUT} ==="
