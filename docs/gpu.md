@@ -139,9 +139,11 @@ the least. It logs `nvidia-smi -L` so the result is tied to the exact slice, and
 sets `XLA_PYTHON_CLIENT_PREALLOCATE=false` for honest per-point device memory.
 
 ```bash
-# ONCE on a login node. Login nodes have no GPU, so mock the CUDA driver virtual
-# package (__cuda) for the solve; the real driver is detected at runtime on the
-# GPU node. (The submit script then runs the env with `pixi run --frozen`.)
+# ONCE from any networked CPU node (a login node, or a dev node like bicep-dev) --
+# it has no GPU, so mock the CUDA driver virtual package (__cuda) for the solve;
+# the real driver is detected at runtime on the GPU node. The env lands in ./.pixi
+# on global home, which the gpu_requeue node reads; the submit script then runs it
+# with `pixi run --frozen` (no re-solve / no network on the GPU node).
 cd ~/jht && CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 # submit (gpu_requeue is preemptible -- the per-jobid JSONL is the protection):
 sbatch scripts/submit_gpu_diagnostic.sh

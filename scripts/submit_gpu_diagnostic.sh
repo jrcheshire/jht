@@ -19,10 +19,11 @@
 # easily; the defaults below are a middle ground -- bump --time AND MAX_WALL
 # together if you want the full ladder to finish on a slow MIG.
 #
-# PRE-INSTALL ONCE on a login node before submitting (downloads + links the CUDA
-# packages; compute nodes may lack network, so stage it on a login node). Login
-# nodes have no GPU, so mock the CUDA driver virtual package (__cuda) for the solve
-# -- the real driver is detected at runtime on the compute node:
+# PRE-INSTALL ONCE from any networked CPU node -- a login node, or a group dev node
+# like bicep-dev. This downloads + links the CUDA packages into ./.pixi on global
+# home, which the gpu_requeue GPU node then reads (so the GPU job needs no network).
+# Such nodes have no GPU, so mock the CUDA driver virtual package (__cuda) for the
+# solve; the real driver is detected at runtime on the GPU node:
 #     cd ~/jht && CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
 # Usage (from the repo root on Cannon):
