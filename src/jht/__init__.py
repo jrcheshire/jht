@@ -46,6 +46,7 @@ from .masked import (
     real_to_alm,
     wiener,
 )
+from .offgrid import adjoint_synthesis_general, synthesis_general
 from .weights import pixel_weights, ring_weights
 
 __version__ = "0.1.0"
@@ -55,6 +56,9 @@ __all__ = [
     # core on-grid transforms
     "synthesis",  # S:  a_lm -> map
     "adjoint_synthesis",  # S^T: map -> a_lm (exact unweighted transpose / VJP)
+    # off-grid (arbitrary points / NUFFT) -- spin 0-3, alm- AND pointing-differentiable
+    "synthesis_general",  # a_lm -> field at arbitrary (theta, phi)
+    "adjoint_synthesis_general",  # its exact transpose
     # analysis (approximate inverse)
     "bare_analysis",  # A0 = S^T W
     "map2alm",  # A0 + Jacobi iteration

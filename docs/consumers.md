@@ -29,6 +29,8 @@ place of ducc0* for its GPU/differentiable tier, but nothing below is BK-specifi
 | `aₗₘ → map` | `jht.synthesis(alm, nside, lmax, spin)` | spin ∈ {0, 2}; spin-2 takes `(E,B)`, returns `(Q,U)` |
 | `map → aₗₘ`, **exact transpose** `Sᵀ` | `jht.adjoint_synthesis(m, nside, lmax, spin)` | the *unweighted* adjoint — the operator a matrix-free solver / VJP needs, **not** an inverse |
 | `map → aₗₘ`, approximate **inverse** | `jht.map2alm(m, …, niter=3)` | ring weights + Jacobi iteration (the healpy-`map2alm` analogue) |
+| **off-grid** `aₗₘ → field` at arbitrary points | `jht.synthesis_general(alm, loc, *, spin, lmax, epsilon=1e-10)` | the **ducc0 `synthesis_general` replacement**; spin ∈ {0,1,2,3}; `loc (npts,2) = (θ,φ)`; alm- **and** pointing-differentiable |
+| off-grid exact transpose | `jht.adjoint_synthesis_general(field, loc, *, spin, lmax, epsilon)` | the `adjoint_synthesis_general` replacement |
 | masked analysis | `jht.pseudo_alm`, `jht.deconvolve` | zero-fill pseudo-aₗₘ; cut-sky CG deconvolution |
 | Wiener / MUSE inner solve | `jht.wiener`, `jht.constrained_realization` | `(SᵀN⁻¹S + C⁻¹)⁻¹SᵀN⁻¹m` (per-pixel `N⁻¹` + Cℓ prior); posterior draws |
 
@@ -48,6 +50,21 @@ layer — plain ℝⁿ→ℝᵐ with no complex-conjugate convention subtlety
 - `jht.bandpower(alm, lmax, spin)` — angular auto-power `C_ℓ` (== `healpy.alm2cl`)
 
 The complex transforms also differentiate under native JAX AD directly.
+
+### Off-grid pointing differentiability (the capability ducc cannot provide)
+
+`jht.synthesis_general` is differentiable **in the pointing `loc`** as well as in
+`alm` — ducc0's FFI raises `NotImplementedError` on `loc` tangents, so a consumer
+that wants ∂(TOD)/∂(pointing) currently has to build analytic position-derivative
+templates by hand (bk-jax synthesizes spin-1/3 ð/ð̄ fields for exactly this).
+With jht the loc-gradient is exact under native AD (`jax.grad`/`jvp`/`jacrev`,
+`jacfwd ≡ jacrev`), so that hand-rolled machinery can be replaced by
+differentiating straight through `synthesis_general`. Interface matches ducc
+(`alm (ncomp,K)`, `loc (npts,2)=(θ,φ)`, no `psi` — orientation rotation stays on
+the consumer side); the −spin channel carries `(−1)^s` and the spin>0 m=0 phantom
+matches ducc on the physical modes (see [`offgrid.md`](offgrid.md) /
+[`DISCREPANCIES.md`](../DISCREPANCIES.md)). Accuracy is the NUFFT `epsilon` tier
+(default 1e-10, matching ducc) — distinct from the on-grid tiers below.
 
 ## The convention bridge (the bk-jax `2·conj` gotcha, resolved)
 

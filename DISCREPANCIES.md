@@ -58,3 +58,27 @@ Two lower-level entry points are **not** supported, by deliberate choice:
   mode entirely; the only kernel-routing fix needs JAX's internal `jax.core.
   Primitive` API (removed in jax 0.9.2). Native AD is the chosen, version-stable
   path. See `docs/design.md` §Differentiability.
+
+## Off-grid (`synthesis_general`): spin>0 m=0 phantom vs ducc (expected, not a defect)
+
+For spin > 0 the off-grid synthesis keeps both real components at every m (Re→first
+plane, Im→second), so the field depends on the **unphysical `Im(a_{l,0})`** at m=0 —
+the same phantom documented on-grid in `docs/design.md`. jht's *strict adjoint*
+`adjoint_synthesis_general` therefore carries a nonzero m=0 imaginary part, while
+ducc0's `adjoint_synthesis_general` zeros it.
+
+- **Status:** expected; jht's adjoint is the exact transpose (the inner-product
+  identity `<S a, v> == <a, Sᵀ v>_G` holds to ~1e-16, `tests/test_offgrid.py::
+  test_adjoint_identity`), ducc applies a different m=0 convention. **Harmless** —
+  physical skies have real `a_{l,0}`, so the phantom is never excited. The ducc
+  cross-check (`test_adjoint_vs_ducc`) compares the physical m≥1 modes (matched to
+  ~1e-13); the m≥1 / real-m=0 content agrees with ducc bit-for-bit.
+
+## Off-grid: the −spin channel carries `(−1)^s` (convention pin, now matched to ducc)
+
+The spin-weighted E/B → ±spin mapping is `+s a = −(aE + i aB)`, `−s a =
+−(−1)^s (aE − i aB)`. The `(−1)^s` on the −spin channel is **invisible for even
+spin** (the on-grid 0/2 path never exposed it) but flips the result for **odd spin
+(1, 3)**. Pinned by matching ducc0's `synthesis_general` for spin 1/3 (a sign probe;
+`tests/test_offgrid.py::test_forward_vs_ducc` covers all of spin 0–3). Documented so
+the even-only on-grid convention is not assumed to carry over to odd spin.

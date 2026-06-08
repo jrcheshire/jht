@@ -156,14 +156,36 @@ any jht-side coupling.
 
 ---
 
-## Phase 4 — Off-grid synthesis (stretch / deferred)
+## Phase 4 — Off-grid synthesis (NUFFT) — DONE (2026-06-07)
 
-The sim-forward path needs synthesis at arbitrary **detector pointings** — a
-NUFFT, not an on-grid SHT, and the piece whose `loc` tangents ducc's FFI can't
-differentiate. This is a separate capability (a JAX NUFFT, e.g. building on
-jax-finufft-class primitives) and is explicitly deferred until the on-grid core
-is solid and a consumer needs it. Likewise any general-sampling support stays
-out until something demands it.
+`jht.synthesis_general` / `jht.adjoint_synthesis_general` synthesize a band-limited
+field at arbitrary **detector pointings**, the JAX-native replacement for ducc0's
+`synthesis_general` (the sim-forward TOD path — the *last* ducc0 capability bk-jax
+depends on). **spin 0, 1, 2, 3**; forward + exact adjoint; alm- **and**
+pointing-differentiable. See `docs/offgrid.md`.
+
+- **Algorithm** = Double-Fourier-Sphere + 2D type-2 NUFFT (ES kernel), matching
+  ducc's `sphere_interpol`. Reuses the on-grid Legendre recursion (`synth_contract`
+  at a Clenshaw–Curtis θ-grid = ducc's `alm2leg`); the new pieces are a pure-JAX
+  2D NUFFT (`src/jht/_nufft.py`, type-1/type-2) + the DFS θ-extension (`src/jht/offgrid.py`).
+- **Gated** (`tests/test_offgrid.py`, 42 cases, spin 0–3): forward vs the exact
+  direct sum and vs ducc ~1e-11 (≤1e-9 tier, ε=1e-10); adjoint identity ~1e-16;
+  alm-VJP bridge ~1e-14; **loc/pointing grad vs analytic ~1e-12**.
+- **Pointing differentiability** — the capability ducc's FFI raises `NotImplementedError`
+  on — is **free and exact** under native AD (the ES-kernel window index is
+  `stop_gradient`-frozen; the gradient flows through the smooth kernel; `jacfwd≡jacrev`
+  preserved). No custom rule (the planned Wang–Fessler fallback was unnecessary).
+  bk-jax currently engineers *around* the missing loc-tangent with analytic spin-1/3
+  position-derivative templates; jht now provides the loc-gradient directly.
+- **Conventions** (`docs/offgrid.md`, `DISCREPANCIES.md`): interface matches ducc
+  (`alm (ncomp,K)`/`(K,)`, `loc (npts,2)=theta,phi`, no `psi`); the **−spin channel
+  carries `(−1)^s`** (invisible for even spin — the on-grid 0/2 path never exposed it);
+  the spin>0 **m=0 Im(a_l0) phantom** is carried by jht's strict adjoint (identity holds
+  to 1e-16) but zeroed by ducc — harmless (real skies → real a_l0).
+
+This **completes the ducc0-removal map below**: jht on-grid + this NUFFT = total
+ducc0 removal from bk-jax's production path (consumer adopts it side-by-side).
+General-sampling support stays out until something demands it.
 
 ---
 
