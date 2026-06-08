@@ -1,28 +1,62 @@
 [project]
 name = "jht"
-version = "0.1.0"
 description = "JAX-native spherical harmonic transforms (BK-regime first): GPU-capable, differentiable, dependency-controlled."
 authors = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
 maintainers = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
 requires-python = ">=3.11"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+  "spherical-harmonic-transform",
+  "healpix",
+  "jax",
+  "gpu",
+  "automatic-differentiation",
+  "nufft",
+  "cosmic-microwave-background",
+  "cosmology",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Astronomy",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Typing :: Typed",
+]
+dynamic = ["version"]   # single-sourced from src/jht/__init__.py (see [tool.hatch.version])
 
 # RUNTIME dependencies are deliberately minimal — this is the dependency-control
 # point of the project. jht itself needs only JAX + numpy. ducc0 / healpy are
 # VALIDATION ORACLES (compared against in tests), never runtime dependencies.
+# Floors: jax>=0.4.30 matches bk-jax; numpy>=1.24 is a conservative modern base.
 dependencies = [
-  "jax",
-  "numpy",
+  "jax>=0.4.30",
+  "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
 validation = ["ducc0", "healpy"]   # oracles for parity tests only
 dev = ["pytest", "ruff", "mypy"]
 
+[project.urls]
+Homepage = "https://github.com/jrcheshire/jht"
+Repository = "https://github.com/jrcheshire/jht"
+Issues = "https://github.com/jrcheshire/jht/issues"
+Changelog = "https://github.com/jrcheshire/jht/blob/main/CHANGELOG.md"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/jht/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jht"]

@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use jht in your research, please cite it."
+title: "jht: JAX-native spherical harmonic transforms"
+abstract: >-
+  A clean-room, pure-JAX implementation of the forward and inverse spherical
+  harmonic transform (map <-> a_lm) for spin-0 and spin-2 fields on the HEALPix
+  ring pixelization, plus an off-grid (NUFFT) path for arbitrary pointings.
+  GPU-capable, fully differentiable under JAX autodiff, and dependency-controlled
+  (JAX + numpy at runtime).
+type: software
+authors:
+  - given-names: James
+    family-names: Cheshire
+    email: cheshire@caltech.edu
+    affiliation: California Institute of Technology
+version: 0.1.0
+date-released: 2026-06-07
+license: MIT
+repository-code: "https://github.com/jrcheshire/jht"
+keywords:
+  - spherical harmonic transform
+  - HEALPix
+  - JAX
+  - GPU
+  - automatic differentiation
+  - NUFFT
+  - cosmic microwave background

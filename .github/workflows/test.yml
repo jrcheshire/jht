@@ -1,0 +1,36 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-and-test:
+    name: Lint + typecheck + tests (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.10
+        with:
+          # `locked: true` runs `pixi install --locked`, so any pyproject.toml
+          # drift from pixi.lock surfaces as a CI failure (the co-commit invariant).
+          locked: true
+          cache: true
+
+      - name: Lint
+        run: pixi run lint
+
+      - name: Typecheck
+        run: pixi run typecheck
+
+      # The default pixi env pulls the ducc0/healpy oracles, so this is the full
+      # gated parity suite (CPU, float64). The GPU parity gate auto-skips (no device).
+      - name: Test
+        run: pixi run test

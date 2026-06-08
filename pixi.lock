@@ -3809,11 +3809,11 @@ packages:
 - pypi: .
   name: jht
   requires_dist:
-  - jax
-  - numpy
-  - ducc0 ; extra == 'validation'
-  - healpy ; extra == 'validation'
+  - jax>=0.4.30
+  - numpy>=1.24
+  - mypy ; extra == 'dev'
   - pytest ; extra == 'dev'
   - ruff ; extra == 'dev'
-  - mypy ; extra == 'dev'
+  - ducc0 ; extra == 'validation'
+  - healpy ; extra == 'validation'
   requires_python: '>=3.11'

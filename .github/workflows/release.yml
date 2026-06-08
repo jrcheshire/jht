@@ -1,0 +1,52 @@
+name: release
+
+# Build and publish to PyPI on a version tag (e.g. `git tag v0.1.0 && git push --tags`).
+# Uses PyPI Trusted Publishing (OIDC) -- no API token / secret.
+#
+# ONE-TIME PyPI SETUP before the first tag (the project need not exist yet -- use a
+# "pending publisher"): on https://pypi.org -> your account -> Publishing, add a
+# trusted publisher with:
+#     PyPI project name: jht
+#     Owner:             jrcheshire
+#     Repository name:   jht
+#     Workflow name:     release.yml
+#     Environment name:  pypi
+# Keep __version__ in src/jht/__init__.py in sync with the tag (the build reads the
+# version from there via hatch).
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI (Trusted Publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/jht/
+    permissions:
+      id-token: write # OIDC for Trusted Publishing -- no token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

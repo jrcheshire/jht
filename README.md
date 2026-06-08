@@ -56,6 +56,8 @@ pixi run -e gpu python scripts/gpu_check.py   # on an NVIDIA box
 As a dependency in another project (runtime deps are just `jax` + `numpy`):
 
 ```bash
+pip install jht          # once released on PyPI
+# or track the repo directly:
 pip install "jht @ git+https://github.com/jrcheshire/jht.git"
 ```
 
