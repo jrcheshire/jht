@@ -380,17 +380,20 @@ def _fits(pred_gb: float, budget_gb: float, safety: float) -> bool:
     return bool(np.isnan(budget_gb)) or pred_gb * safety <= budget_gb
 
 
-def build_ladder(tier: str, budget_gb: float) -> list[dict]:
+def build_ladder(
+    tier: str, budget_gb: float, kinds: tuple[str, ...] = ("ongrid", "offgrid", "vmap")
+) -> list[dict]:
     """The memory-driven list of measurement specs: each heavy point is gated by a
     predicted device footprint vs ``budget_gb``, so a 10 GB MIG slice and an 80 GB
     A100 each get exactly as much as fits -- with the per-point OOM guard as the
-    real boundary. ``--dry-run`` prints this for review before burning the slot."""
+    real boundary. ``kinds`` selects the measurement families to include (a focused
+    re-run can do, e.g., just off-grid + vmap). ``--dry-run`` prints this for review."""
     cpu = tier == "cpu"
     batches = [1, 4] if cpu else ([1, 4, 16] if tier == "mig" else VMAP_BATCHES)
     dtypes = ["fp64"] if cpu else ["fp64", "fp32"]  # fp32 = throttle probe only
 
     specs: list[dict] = []
-    for nside, lmax in ONGRID:
+    for nside, lmax in ONGRID if "ongrid" in kinds else ():
         if cpu and nside > 512:  # keep the self-test quick
             continue
         for spin in (0, 2):
@@ -413,7 +416,7 @@ def build_ladder(tier: str, budget_gb: float) -> list[dict]:
     # off-grid before vmap: gpu_requeue is preemptible, so order by value -- the
     # never-measured off-grid (ducc-replacement) capability should land before the
     # more-inferable vmap throughput sweep if the slot is cut short.
-    for lmax, npts, eps in OFFGRID:
+    for lmax, npts, eps in OFFGRID if "offgrid" in kinds else ():
         if cpu and (lmax > 256 or npts > 100_000 or eps != 1e-10):
             continue
         if not _fits(_offgrid_peak_gb(lmax, npts, eps), budget_gb, SAFETY_OFFGRID):
@@ -431,7 +434,7 @@ def build_ladder(tier: str, budget_gb: float) -> list[dict]:
                     best_of=3,
                 )
             )
-    for nside, lmax in VMAP_SIZES:
+    for nside, lmax in VMAP_SIZES if "vmap" in kinds else ():
         if cpu and nside > 512:
             continue
         for batch in batches:
@@ -623,12 +626,23 @@ def main() -> None:
         help="stop launching new points after this many seconds total (0 = no limit); "
         "a short requeue slot still saves every completed point to the JSONL",
     )
+    ap.add_argument(
+        "--kinds",
+        default="ongrid,offgrid,vmap",
+        help="comma-separated measurement families to run (ongrid,offgrid,vmap); "
+        "e.g. `--kinds offgrid,vmap` for a focused re-run that skips the slow on-grid block",
+    )
     ap.add_argument("--out", default="gpu_diag_results.jsonl", help="JSONL output path")
     args = ap.parse_args()
 
     if args.one is not None:
         run_child(json.loads(args.one))
         return
+
+    kinds = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
+    bad = set(kinds) - {"ongrid", "offgrid", "vmap"}
+    if bad:
+        ap.error(f"--kinds: unknown {sorted(bad)} (allowed: ongrid, offgrid, vmap)")
 
     import jax
 
@@ -643,7 +657,7 @@ def main() -> None:
     else:
         tier = _tier_for(limit_gb, gpu)
     budget_gb = limit_gb if not np.isnan(limit_gb) else _TIER_BUDGET_GB[tier]
-    ladder = build_ladder(tier, budget_gb)
+    ladder = build_ladder(tier, budget_gb, kinds)
 
     print(f"jht GPU diagnostic  (jax {jax.__version__})")
     print(
@@ -652,8 +666,8 @@ def main() -> None:
     )
     wall = f"max-wall {args.max_wall:.0f}s  |  " if args.max_wall else ""
     print(
-        f"ladder: {len(ladder)} points  |  per-point timeout {args.timeout:.0f}s  |  "
-        f"{wall}out: {args.out}"
+        f"ladder: {len(ladder)} points  |  kinds {','.join(kinds)}  |  "
+        f"per-point timeout {args.timeout:.0f}s  |  {wall}out: {args.out}"
     )
     if not gpu:
         print("** no GPU visible -- CPU self-test (exercises every path; not the perf run) **")
