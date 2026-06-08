@@ -352,6 +352,15 @@ def constrained_realization(
     symmetry.)  ``key`` is a ``jax.random`` PRNG key; one call returns one draw.
 
     Parameters mirror :func:`wiener`.  Returns a posterior a_lm sample.
+
+    .. note::
+       This is a genuine posterior draw only when ``inv_noise`` (a real noise
+       model) is given: the source ``s1 = T S^T(sqrt(w_pix) * omega)`` has
+       covariance ``A_x`` only if ``w_pix`` is the inverse-noise weight.  The
+       ``mask``-only fallback (inherited from :func:`wiener`'s shared signature)
+       makes ``sqrt(mask * W)`` stand in for a noise model, so the draw's
+       covariance is **not** the posterior -- pass ``inv_noise`` for a
+       constrained realization.
     """
     w_pix = _weight_pix(nside, spin, inv_noise=inv_noise, mask=mask, use_weights=use_weights)
     d_diag = _prior_diag(signal_cl, lmax, spin)

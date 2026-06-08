@@ -118,9 +118,11 @@ def timing(lmax, npts):
         adj(f, loc).block_until_ready()
         t_adj = time.time() - t0
         print(f"  spin={spin}: synthesis {1e3 * t_syn:6.0f} ms   adjoint {1e3 * t_adj:6.0f} ms")
-    # the oversampled DFS grid is ~sigma^2 (2 lmax)^2 complex; ~0.5 GB at lmax=1000, sigma=2
-    g = (2.0 ** 2) * (2 * lmax) ** 2 * 16 / 1e9
-    print(f"  (oversampled grid ~{g:.2f} GB at sigma=2)")
+    # footprint is dominated by the NUFFT (Npts, W, W) stencil, not the DFS grid.
+    grid = (2.0**2) * (2 * lmax) ** 2 * 16 / 1e9  # ~sigma^2 (2 lmax)^2 complex
+    W = 14  # eps=1e-10 kernel half-width (_nufft._KERNEL_DB)
+    stencil = npts * W * W * 16 / 1e9
+    print(f"  (DFS grid ~{grid:.2f} GB; NUFFT stencil Npts*W^2 ~{stencil:.2f} GB at W=14)")
 
 
 def main():

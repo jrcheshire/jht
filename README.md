@@ -13,24 +13,30 @@ transform (ducc0) structurally cannot, while *owning the numerics*. See
 
 ## Status (2026-06-07)
 
-Phases 0–2 **complete and validated** (128 tests, CPU/float64):
+Phases 0–4 **complete and validated** (190 tests pass + 8 GPU-gated skips,
+CPU/float64):
 
-- **Transforms** — spin-0 & spin-2 synthesis (`aₗₘ→map`) and the exact adjoint
-  `Sᵀ`, validated to machine precision vs healpy **and** ducc0; spin-2 inverse at
-  the HEALPix floor with **no s2fft-style structural defect**.
+- **On-grid transforms** — spin-0 & spin-2 synthesis (`aₗₘ→map`) and the exact
+  adjoint `Sᵀ`, validated to machine precision vs healpy **and** ducc0; spin-2
+  inverse at the HEALPix floor with **no s2fft-style structural defect**.
 - **Accuracy** — jht's own ring quadrature weights + Jacobi iteration reach
   ~1e-13 on band-limited maps (matches `healpy.map2alm(use_weights=True)`); see
   [`docs/accuracy.md`](docs/accuracy.md).
-- **Partial-sky** — masked pseudo-aₗₘ + a cut-sky CG deconvolution; see
+- **Partial-sky** — masked pseudo-aₗₘ, a cut-sky CG deconvolution, and a masked
+  Wiener filter / constrained realization (the MUSE inner solve); see
   [`docs/masked.md`](docs/masked.md).
+- **Off-grid (NUFFT)** — `synthesis_general` / `adjoint_synthesis_general`
+  evaluate a band-limited field at **arbitrary pointings** (spin 0–3), alm- **and**
+  pointing-differentiable. The JAX-native replacement for ducc0's
+  `sht.experimental.synthesis_general` (on-grid SHT + this NUFFT = the full ducc0
+  surface bk-jax depends on); see [`docs/offgrid.md`](docs/offgrid.md).
 - **Differentiability** — native JAX autodiff (`jacfwd ≡ jacrev`, tight adjoint
   identity), plus a convention-clean real-DOF layer `jht.diff`; see
   [`docs/design.md`](docs/design.md) §Differentiability.
-
-**Phase 3 (current): GPU enablement + standalone-dependency surface.** A locked
-CUDA environment (`pixi … -e gpu`) and a GPU parity/benchmark harness are in
-place; the measured GPU speedup/parity run is deferred to an NVIDIA box (Cannon).
-See [`docs/gpu.md`](docs/gpu.md).
+- **GPU** — pure JAX, so the transforms run on CUDA with no code change; a locked
+  CUDA env (`pixi … -e gpu`) plus parity (`scripts/gpu_check.py`) and single-slot
+  diagnostic (`scripts/gpu_diagnostic.py`) harnesses are in place. The *measured*
+  GPU run is deferred to an NVIDIA box (Cannon); see [`docs/gpu.md`](docs/gpu.md).
 
 ## Install
 

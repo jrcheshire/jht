@@ -40,6 +40,9 @@ _KERNEL_DB: dict[float, tuple[int, float]] = {
 
 
 def _eps_to_w_sigma(eps: float) -> tuple[int, float]:
+    # Keys are achievable accuracies; pick the loosest (cheapest -> largest key)
+    # that still meets the request.  If eps is tighter than the DB's best, fall
+    # back to min(key) -- the smallest key is the most-accurate (largest-W) kernel.
     ok = [e for e in _KERNEL_DB if e <= eps * 1.0000001]
     return _KERNEL_DB[max(ok)] if ok else _KERNEL_DB[min(_KERNEL_DB)]
 

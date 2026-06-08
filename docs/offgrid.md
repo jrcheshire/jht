@@ -69,6 +69,17 @@ so ε=1e-10 is ~1e-12 relative.)
 This is a **deliberately new accuracy tier** set by the NUFFT ε (matching ducc) —
 *not* the on-grid weighted ~1e-13. Do not conflate the tiers.
 
+### Memory at scale
+
+The dominant intermediate is **not** the oversampled DFS grid (`nk·nm` complex,
+~0.26 GB at lmax=1000, σ=2) but the NUFFT ES-stencil `(Npts, W, W)` complex array
+(`jht._nufft`, the type-2 gather and its type-1 transpose), ≈ `Npts·W²·16 B` —
+~3.1 GB at N=1e6, W=14 (ε=1e-10). It is linear in the number of points and
+**quadratic in the kernel half-width `W`**, so a looser ε (smaller W) is the memory
+lever at large N: ε=1e-8 (W=10) cuts it to ~1.6 GB. Budget
+`grid + Npts·W²·16 B` for the off-grid footprint; `scripts/gpu_diagnostic.py`
+reports measured-vs-predicted at production scale.
+
 ## Differentiability — alm **and** pointing
 
 Both gradients are exact under JAX's **native autodiff** (no custom rule):
