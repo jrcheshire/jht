@@ -410,23 +410,9 @@ def build_ladder(tier: str, budget_gb: float) -> list[dict]:
                         best_of=best,
                     )
                 )
-    for nside, lmax in VMAP_SIZES:
-        if cpu and nside > 512:
-            continue
-        for batch in batches:
-            if not _fits(_ongrid_peak_gb(nside, 0, batch), budget_gb, SAFETY_ONGRID):
-                continue
-            specs.append(
-                dict(
-                    kind="vmap",
-                    nside=nside,
-                    lmax=lmax,
-                    spin=0,
-                    batch=batch,
-                    dtype="fp64",
-                    best_of=2,
-                )
-            )
+    # off-grid before vmap: gpu_requeue is preemptible, so order by value -- the
+    # never-measured off-grid (ducc-replacement) capability should land before the
+    # more-inferable vmap throughput sweep if the slot is cut short.
     for lmax, npts, eps in OFFGRID:
         if cpu and (lmax > 256 or npts > 100_000 or eps != 1e-10):
             continue
@@ -443,6 +429,23 @@ def build_ladder(tier: str, budget_gb: float) -> list[dict]:
                     dtype="fp64",
                     do_grad=(spin == 0 and lmax in (256, 512)),
                     best_of=3,
+                )
+            )
+    for nside, lmax in VMAP_SIZES:
+        if cpu and nside > 512:
+            continue
+        for batch in batches:
+            if not _fits(_ongrid_peak_gb(nside, 0, batch), budget_gb, SAFETY_ONGRID):
+                continue
+            specs.append(
+                dict(
+                    kind="vmap",
+                    nside=nside,
+                    lmax=lmax,
+                    spin=0,
+                    batch=batch,
+                    dtype="fp64",
+                    best_of=2,
                 )
             )
     return specs

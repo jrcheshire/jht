@@ -129,6 +129,27 @@ pixi run -e gpu python scripts/gpu_diagnostic.py --max-wall 1800 --out cannon_ru
 On a CPU-only box it runs a reduced self-test exercising every path, so it can be
 smoke-tested before Cannon.
 
+### On Cannon (batch only) — `scripts/submit_gpu_diagnostic.sh`
+
+There are no interactive GPU nodes, so run it via SLURM. The submit script targets
+`--account=kovac_lab --partition=gpu_requeue --gres=gpu:1` and inherits all the
+single-slot design above: it auto-sizes to whatever MIG slice / card it lands on,
+`--max-wall`-bounds itself, and runs off-grid before vmap so a preempted slot loses
+the least. It logs `nvidia-smi -L` so the result is tied to the exact slice, and
+sets `XLA_PYTHON_CLIENT_PREALLOCATE=false` for honest per-point device memory.
+
+```bash
+# ONCE on a login node (the CUDA env solve is slow; don't burn slot time on it):
+cd ~/jht && pixi install -e gpu
+# submit (gpu_requeue is preemptible -- the per-jobid JSONL is the protection):
+sbatch scripts/submit_gpu_diagnostic.sh
+# full ladder on a slow MIG (bump --time AND MAX_WALL together):
+MAX_WALL=6600 sbatch --time=02:30:00 scripts/submit_gpu_diagnostic.sh
+```
+
+Outputs land in `runs/gpu-diag/` (gitignored): `slurm_<jobid>.out` (human table) and
+`diag_<jobid>.jsonl` (copy back here to analyze).
+
 ## Known caveat — memory ceiling
 
 At the nside=2048 ceiling the isolated footprint is ~11–13 GB, driven by the
