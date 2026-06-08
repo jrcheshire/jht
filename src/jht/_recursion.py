@@ -163,6 +163,31 @@ def _wigner_seed(x: jax.Array, M: int, Mp: int, lmin: int) -> tuple[float, jax.A
     return sign, log_abs
 
 
+def _wigner_seed_np(x: np.ndarray, M: int, Mp: int, lmin: int) -> tuple[float, np.ndarray]:
+    """Pure-numpy ``_wigner_seed`` for the static plan build (trace-safe; identical formula).
+
+    ``build_recursion_plan`` must produce numpy tables even when first called *inside*
+    a ``jit`` trace (cold ``lru_cache``); the jax :func:`_wigner_seed` would leak a tracer.
+    """
+    k0 = max(0, M - Mp)
+    lg = math.lgamma
+    log_fac = 0.5 * (
+        lg(lmin + M + 1) + lg(lmin - M + 1) + lg(lmin + Mp + 1) + lg(lmin - Mp + 1)
+    ) - (lg(k0 + 1) + lg(lmin + M - k0 + 1) + lg(lmin - Mp - k0 + 1) + lg(k0 - M + Mp + 1))
+    sign = -1.0 if (k0 % 2) else 1.0
+    pow_cos = 2 * lmin - 2 * k0 + M - Mp
+    pow_sin = 2 * k0 - M + Mp
+    cos_h = np.sqrt(np.clip((1.0 + x) / 2.0, 0.0, 1.0))
+    sin_h = np.sqrt(np.clip((1.0 - x) / 2.0, 0.0, 1.0))
+    log_abs = np.broadcast_to(np.float64(log_fac), x.shape).astype(np.float64).copy()
+    with np.errstate(divide="ignore"):  # log(0) -> -inf at a pole -> exp = 0 (correct)
+        if pow_cos > 0:
+            log_abs = log_abs + pow_cos * np.log(cos_h)
+        if pow_sin > 0:
+            log_abs = log_abs + pow_sin * np.log(sin_h)
+    return sign, log_abs
+
+
 def wigner_d_column(x, M: int, Mp: int, lmax: int) -> jax.Array:
     """Wigner small-d ``d^l_{M,M'}(theta)`` for ``l = max(|M|,|M'|) .. lmax``."""
     M, Mp = int(M), int(Mp)
@@ -252,13 +277,14 @@ class RecursionPlan(NamedTuple):
 def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
     """Precompute the static all-m recursion tables at colatitudes ``x=cos(theta)``.
 
-    ``spin`` is one of ``0, +2, -2``.  ``x`` is a concrete ``(n_theta,)`` array of
-    ring colatitudes (HEALPix geometry is static), so the whole plan is numpy and
-    becomes compile-time constants inside the jitted transform.
+    ``spin`` is an integer with ``|spin| <= 3`` (on-grid uses 0, +-2; the off-grid
+    NUFFT path also uses +-1, +-3 for pointing-derivative templates).  ``x`` is a
+    concrete ``(n_theta,)`` array of colatitudes (geometry is static), so the whole
+    plan is numpy and becomes compile-time constants inside the jitted transform.
     """
     spin = int(spin)
-    if spin not in (0, 2, -2):
-        raise NotImplementedError(f"spin={spin} unsupported (only 0, +2, -2)")
+    if abs(spin) > 3:
+        raise NotImplementedError(f"spin={spin} unsupported (only |spin| <= 3)")
     x = np.asarray(x, dtype=np.float64)
     M = lmax + 1
     L1 = lmax + 1
@@ -295,7 +321,6 @@ def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
             (((-1.0) ** np.arange(M))[None, :])
             * np.sqrt((2.0 * ell + 1.0) / (4.0 * np.pi))[:, None]
         )
-        xj = jnp.asarray(x)
         for m in range(M):
             lm = int(lmin[m])
             if lm < lmax:
@@ -303,9 +328,9 @@ def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
                 A[lm + 1 : lmax + 1, m] = Ac
                 C[lm + 1 : lmax + 1, m] = Cc
                 B[lm + 1 : lmax + 1, m] = Bc
-            sign, logabs = _wigner_seed(xj, -m, spin, lm)
+            sign, logabs = _wigner_seed_np(x, -m, spin, lm)  # numpy: trace-safe static build
             seed_sign[m] = sign
-            seed_log[m] = np.asarray(logabs)
+            seed_log[m] = logabs
 
     return RecursionPlan(A, B, C, pref, seed_sign, seed_log, is_seed, is_active, spin, lmax)
 
