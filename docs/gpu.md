@@ -87,6 +87,48 @@ dead code; on the GPU box it produces the parity + speedup numbers. The pytest
 gate `tests/test_gpu.py` makes the parity assertion part of the suite and
 `pytest.skip`s cleanly when no GPU is present.
 
+## The single-slot diagnostic — `scripts/gpu_diagnostic.py`
+
+`gpu_check.py` is the parity gate plus a quick ladder. For the **one** moderate-scale
+`gpu_requeue` slot the GPU numbers have been waiting on, use the purpose-built
+`scripts/gpu_diagnostic.py` — designed to extract everything from a single job so a
+second is not needed:
+
+- GPU-vs-CPU **speedup** and the card's **fp64/fp32 throttle** factor (the same op
+  timed in both dtypes — fp32 is *throughput-only*, never an accuracy claim);
+- fp64 **GPU==CPU parity** measured on-device;
+- the on-device **memory ceiling** per `(nside, lmax, spin)`, including nside=2048;
+- **vmap throughput** vs batch size (the forecast-sweep per-realization knee);
+- **off-grid NUFFT at production scale** (lmax~1000, N up to 1e6), measured vs
+  predicted footprint (the `(Npts, W, W)` stencil — see `docs/offgrid.md`);
+- the off-grid **pointing-gradient** cost (the ducc-`NotImplementedError`
+  capability); compile time, reported separately everywhere.
+
+Each measurement point runs in a **fresh subprocess**: this gives a clean per-point
+device peak (`peak_bytes_in_use` is a cumulative counter), survives per-point OOM
+(one OOM never wastes the slot), and toggles x64 per point.
+
+`gpu_requeue` hands you *whatever is free* — most often a **10–20 GB A100 MIG
+slice**, occasionally a whole 80 GB card. So the ladder is **memory-driven**: each
+heavy point is gated by a predicted device footprint against the detected (or
+`--limit-gb`) memory, and the run fills whatever it lands on — a MIG slice still
+reaches the production off-grid point (lmax≈1000), which is memory-light
+(`grid + Npts·W²`), even when it cannot reach nside=2048 on-grid. The per-point OOM
+guard is the true boundary; `--max-wall` makes a short slot still save every
+completed point; output is a human table + machine-readable JSONL (re-plot without
+a second job) + a derived summary.
+
+```bash
+# preview what a given slice would run, from anywhere (laptop is fine):
+python scripts/gpu_diagnostic.py --dry-run --limit-gb 10      # a 10 GB MIG slice
+python scripts/gpu_diagnostic.py --dry-run --limit-gb 80      # a full A100
+# the run on the box (auto-detects the slice; cap total wall time for a short slot):
+pixi run -e gpu python scripts/gpu_diagnostic.py --max-wall 1800 --out cannon_run.jsonl
+```
+
+On a CPU-only box it runs a reduced self-test exercising every path, so it can be
+smoke-tested before Cannon.
+
 ## Known caveat — memory ceiling
 
 At the nside=2048 ceiling the isolated footprint is ~11–13 GB, driven by the

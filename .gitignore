@@ -18,6 +18,7 @@ dist/
 # Scratch / run outputs (not fixtures)
 runs/
 scratch/
+gpu_diag_results.jsonl
 
 # OS / editor
 .DS_Store
