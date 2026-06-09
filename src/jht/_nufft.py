@@ -97,6 +97,8 @@ class NufftPlan(NamedTuple):
     corr_m: np.ndarray  # (Nm,)
     kbins: np.ndarray  # (Nk,)  centered modes mod nk
     mbins: np.ndarray  # (Nm,)  centered modes mod nm
+    fill_src: np.ndarray  # (nk*nm,) gather index: oversampled cell -> source mode in c.ravel()
+    fill_mask: np.ndarray  # (nk*nm,) True where a centered mode lands on this cell
 
 
 @lru_cache(maxsize=None)
@@ -104,12 +106,24 @@ def nufft_plan(Nk: int, Nm: int, eps: float) -> NufftPlan:
     W, sigma = _eps_to_w_sigma(eps)
     nk, nm = _next_size(sigma * Nk), _next_size(sigma * Nm)
     bk, bm = _beta(W, sigma), _beta(W, sigma)
+    kbins = np.arange(-(Nk // 2), -(Nk // 2) + Nk) % nk
+    mbins = np.arange(-(Nm // 2), -(Nm // 2) + Nm) % nm
+    # Inverse fill index so nufft2d2 builds the oversampled grid by a GATHER, not an
+    # fp64/complex SCATTER (`C.at[].set`) -- the scatter was 97% of the off-grid forward
+    # on GPU (~25000x the gather; see scripts/profile_offgrid_forward.py).  Centered modes
+    # at sigma>=2 are collision-free in the oversampled grid, so the gather reproduces the
+    # scatter exactly (asserted below).
+    dest = (kbins[:, None] * nm + mbins[None, :]).ravel()
+    if np.unique(dest).size != Nk * Nm:
+        raise ValueError("NUFFT grid-build indices collide; gather build invalid")
+    flat = np.full(nk * nm, -1, dtype=np.int64)
+    flat[dest] = np.arange(Nk * Nm)
     return NufftPlan(
         Nk, Nm, nk, nm, W, bk, bm,
         _correction(Nk, nk, W, bk),
         _correction(Nm, nm, W, bm),
-        np.arange(-(Nk // 2), -(Nk // 2) + Nk) % nk,
-        np.arange(-(Nm // 2), -(Nm // 2) + Nm) % nm,
+        kbins, mbins,
+        np.where(flat >= 0, flat, 0), flat >= 0,
     )
 
 
@@ -133,8 +147,11 @@ def nufft2d2(plan: NufftPlan, coeffs, x, y):
     ``coeffs`` (Nk, Nm) complex (centered modes); ``x, y`` (Npts,) on ``[0,2pi)``.
     """
     c = coeffs / jnp.asarray(plan.corr_k)[:, None] / jnp.asarray(plan.corr_m)[None, :]
-    C = jnp.zeros((plan.nk, plan.nm), dtype=jnp.complex128)
-    C = C.at[jnp.asarray(plan.kbins)[:, None], jnp.asarray(plan.mbins)[None, :]].set(c)
+    # Build the oversampled grid by a GATHER (the inverse fill index lives in the plan);
+    # the equivalent fp64/complex `.at[].set` scatter was 97% of the GPU forward.
+    C = jnp.where(
+        jnp.asarray(plan.fill_mask), c.ravel()[jnp.asarray(plan.fill_src)], 0.0 + 0.0j
+    ).reshape(plan.nk, plan.nm)
     g = jnp.fft.ifft2(C) * (plan.nk * plan.nm)
     lk, wk = _stencil(x, plan.nk, plan.W, plan.beta_k)
     lm, wm = _stencil(y, plan.nm, plan.W, plan.beta_m)

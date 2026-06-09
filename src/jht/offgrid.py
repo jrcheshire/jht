@@ -144,7 +144,8 @@ def _Fkm_to_coeffs(p: _OffgridPrep, G):
 def _alm_to_Fkm(p: _OffgridPrep, alm):
     a, b = _channels(p, alm)
     Cpos = synth_contract(p.plan_pos, jnp.asarray(p.x_cc), a)  # (lmax+1, ntheta_s)
-    Cneg = synth_contract(p.plan_neg, jnp.asarray(p.x_cc), b)
+    # spin-0: plan_neg is plan_pos and a == b, so the -spin recursion is identical -- skip it.
+    Cneg = Cpos if p.spin == 0 else synth_contract(p.plan_neg, jnp.asarray(p.x_cc), b)
     return _coeffs_to_Fkm(p, Cpos, Cneg)
 
 
