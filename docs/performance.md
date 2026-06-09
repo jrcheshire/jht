@@ -104,8 +104,10 @@ it); runtime is unaffected (FFTs are ≲10 %).
 ## Notes / future levers (deferred)
 
 - **Compile time grows with the cap-FFT length-groups** (~nside distinct lengths
-  unrolled in one jit). It is a one-time cost (jit caches by shape) and modest
-  through the ceiling; a pad-and-fold scheme could cut it if it ever bites.
+  unrolled in one jit). One-time (jit caches by shape) and modest on CPU, but on
+  **GPU it bites**: minutes at nside=1024 and `ptxas` fails outright at nside=2048,
+  so the de-unroll (pad-and-fold / single combined scatter→gather) is a real GPU
+  item — see `docs/gpu.md`.
 - **`map2alm` recomputes the recursion** each of its 7 passes (the memory-safe
   on-the-fly choice). A memory-gated cached-λ fast path for small nside is an
   easy future optimization.
@@ -113,3 +115,20 @@ it); runtime is unaffected (FFTs are ≲10 %).
   partial-sky (masked) analysis were the Phase-1 accuracy rungs (done — see
   `docs/accuracy.md`, `docs/masked.md`); differentiability is Phase 2; GPU is
   Phase 3.
+
+## GPU performance (measured 2026-06-08)
+
+Method and full numbers in `docs/gpu.md`. Headline (Cannon A100 MIG / V100, fp64):
+
+- **Forward synthesis** GPU-accelerates **14–60×** the (8-core) CPU; fp64/fp32 ≈
+  2.2×; fp64 GPU==CPU parity 1e-14 … 1e-13.
+- **Adjoint / `map2alm`** were initially ~21× too slow on GPU: the dense→triangular
+  alm packing used a **scatter** (`at[idx].set`), which is **~38000× slower than a
+  gather in fp64 on GPU**. Fixed by packing via a gather (`dense_to_tri`, the mirror
+  of the forward `tri_to_dense`) — adjoint **4041 → 187 ms** at nside=512, `map2alm`
+  ~16 s → ~1.3 s. Numerically identical (the gather index is the scatter's inverse).
+- **Off-grid** is correct and memory-light on GPU (lmax=1000, N=1e6 ~1.1 GB); the
+  pointing gradient costs ~1× a forward.
+- **Open GPU items:** off-grid *forward* synthesis ~35 s at lmax=1000 (the general
+  `synth_contract`, un-tuned for GPU); nside=2048 does not compile (the unrolled
+  cap-FFT assembly exceeds `ptxas` — needs de-unrolling). See `docs/gpu.md`.

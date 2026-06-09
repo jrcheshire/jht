@@ -6,9 +6,12 @@ contraction + ring FFTs run on whatever device JAX defaults to. This note pins
 the install story, the one footgun (x64), the accuracy tier, and how to validate
 on hardware.
 
-**Status:** the GPU env and the parity/benchmark harness are in place; the
-*measured* GPU speedup/parity run is **deferred to an NVIDIA box** (Cannon).
-Development is on osx-arm64, which has no fp64 GPU (see "Mac-local tier" below).
+**Status (2026-06-08):** measured on Cannon `gpu_requeue` A100 (MIG) slices and a
+V100 — see "Measured GPU performance" below. fp64 GPU==CPU parity holds; forward
+synthesis and (after the `dense_to_tri` gather fix) the adjoint / `map2alm` and the
+off-grid path all run well at nside ≤ 1024. Two GPU items remain: off-grid *forward*
+speed and the nside=2048 compile ceiling. Development is on osx-arm64, which has no
+fp64 GPU (see "Mac-local tier" below).
 
 ## The `gpu` pixi environment
 
@@ -154,17 +157,48 @@ MAX_WALL=6600 sbatch --time=02:30:00 scripts/submit_gpu_diagnostic.sh
 Outputs land in `runs/gpu-diag/` (gitignored): `slurm_<jobid>.out` (human table) and
 `diag_<jobid>.jsonl` (copy back here to analyze).
 
-## Known caveat — memory ceiling
+## Measured GPU performance (2026-06-08)
 
-At the nside=2048 ceiling the isolated footprint is ~11–13 GB, driven by the
-**unrolled per-group cap-FFT scatters** into the full map (XLA does not always
-fuse these in place) — *not* the recursion (see `docs/performance.md`). This is
-the next memory lever (a pad-and-fold to a common ring length / single combined
-scatter). It is **deferred**: bench on the GPU first, optimize only if it bites.
+Measured on Cannon `gpu_requeue` A100 MIG slices (10–25 GB) and a V100-16GB, fp64
+(`scripts/gpu_diagnostic.py`, `scripts/profile_adjoint.py`):
+
+- **fp64 GPU==CPU parity:** relerr 1e-14 … 1e-13 across nside 256–1024, spin 0/2 —
+  the ~1e-12 contract holds on hardware.
+- **Forward synthesis:** 14–60× the (8-core) CPU; **fp64/fp32 ≈ 2.2×** (clean A100
+  fp64 — no consumer-card throttle on these parts).
+- **Adjoint / `map2alm`:** the dense→triangular alm packing was a **scatter**
+  (`at[idx].set(mode="drop")`), which is catastrophically slow in fp64 on GPU
+  (~38000× a gather; nside=512 fp64 it was 3.8 s of a 4.0 s adjoint). Fixed by
+  packing via a **gather** (`dense_to_tri`, mirroring the forward `tri_to_dense`):
+  adjoint **4041 → 187 ms** at nside=512 (~21×), so `map2alm` drops ~16 s → ~1.3 s.
+  The on-grid analysis / MUSE-Wiener adjoint path is now usable on GPU. *(Lesson:
+  never `at[idx].set` for fp64/complex alm packing on GPU — use a gather.)*
+- **Off-grid:** correct and **memory-light** — lmax=1000, N=1e6 peaks ~1.1 GB, well
+  under the predicted ceiling (XLA fuses the `(Npts,W,W)` stencil rather than
+  materializing it). The **pointing gradient costs ~1× a forward** (the
+  ducc-`NotImplementedError` capability, cheap on GPU). The adjoint shares the
+  gather fix.
+- **Batched (`vmap`) synthesis:** per-realization time falls with batch (the
+  forecast-sweep knee), e.g. ~286 → ~168 ms/realization at nside=512 (batch 1→4).
+
+### Two GPU items still open
+
+- **Off-grid *forward* synthesis is slow** — ~35 s at lmax=1000, *independent of N*
+  (so recursion/DFS-bound, the general `synth_contract`, not the NUFFT) and ~50× the
+  equivalent on-grid synthesis. Un-tuned for GPU; separate from the adjoint fix.
+- **nside=2048 does not compile on GPU** — `ptxas` exits non-zero (code 9): the
+  ~nside-way *unrolled* per-ring-group cap-FFT assembly is too large a kernel for the
+  PTX assembler (and already compiles for minutes at nside=1024). This is a
+  **compile** ceiling, not memory (measured footprints are small, ~1–2 GB at
+  nside=1024). The fix is to **de-unroll** that assembly (batch/bucket the ring FFTs
+  + a single combined gather/scatter). Above the typical MUSE nside (≤1024), so
+  deferred.
 
 ## Open / to settle on Cannon
 
 - Exact `cuda-version` pin vs Cannon's CUDA driver/module (the env targets 12.9
-  runtime; the driver only needs to be forward-compatible).
-- The card's fp64 throttle factor → expected speedup envelope.
-- Whether the memory ceiling forces the pad-and-fold lever in practice.
+  runtime; the driver only needs to be forward-compatible). Confirmed working on the
+  A100/V100 `gpu_requeue` nodes via `pixi run --frozen -e gpu`.
+- ~~fp64 throttle factor~~ → measured ≈ 2.2× (A100/V100; good fp64 parts).
+- ~~Whether the memory ceiling forces a rewrite~~ → the nside=2048 blocker is the
+  `ptxas` **compile** ceiling (de-unroll), not memory; see above.
