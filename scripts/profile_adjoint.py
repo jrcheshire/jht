@@ -1,30 +1,26 @@
-"""Pin the on-grid adjoint GPU bottleneck to a specific op, before the rewrite.
+"""Locate the on-grid adjoint GPU phantom by fully decomposing it (+ test a fix).
 
-Run 1 (profile_20148324) confirmed the cost is the adjoint's ring-assembly, not the
-recursion (nside=512 fp64: adj 5906 ms, rec_adj 592 ms => assembly ~5314 ms; forward
-assembly ~30 ms). This script sub-splits that assembly so the rewrite is targeted.
+Story so far:
+  * Run 2 (profile_20168749): the adjoint ring-assembly (32 ms) and the recursion
+    (310 ms) are each fast in isolation, but the full fp64 adjoint is ~4400 ms at
+    nside=512 -- ~4050 ms of "phantom" cost, fp64-specific, scaling as lmax^2.
+  * The optimization_barrier remat fix (run profile_20179402) did NOT change it ->
+    not rematerialization.
 
-The adjoint ring-assembly (healpix._prepare's spin-0 `adj`, per ring-length group g):
-    x  = m[g.pix_idx]                 # (n_g, N)  gather contiguous ring pixels from the map
-    fr = fft(x, axis=1)               # per-ring FFT
-    Vg = fr[:, g.g_plus] * phaseᵀ     # (n_g, M)  modular column fold/expand (m mod N) + phase
-    V  = V.at[:, g.ring_idx].set(Vgᵀ) # scatter into V (M, nrings)
+The full spin-0 adjoint is:  asm (build V) -> fold_south(V) -> adjoint_contract_eo
+(recursion) -> dense_to_tri.  Only `asm` and the recursion were timed before. This
+script times ALL FOUR so they *sum* to the real adjoint and the phantom is
+unambiguous, and -- since synthesis uses a GATHER (`tri_to_dense`) for alm packing
+while the adjoint uses a SCATTER (`dense_to_tri`, `at[...].set(mode='drop')`), the
+real forward/adjoint asymmetry and a classic slow-GPU-fp64-scatter -- it also times
+a GATHER-based `dense_to_tri` as the candidate fix.
 
-We time the real adjoint, the recursion alone (`adjoint_contract_eo`), and a faithful
-reconstruction of the assembly under toggles, so the deltas isolate each op:
-    asm        : full assembly  (should ~= adj - rec_adj -> validates the reconstruction)
-    asm_belt   : assembly over the equatorial belt group only (one batched FFT)
-    asm_cap    : assembly over the ~nside cap length-groups only (the unrolled part)
-    no_fft     : assembly with the FFT skipped         -> FFT cost     ~= asm - no_fft
-    no_scatter : assembly accumulating instead of V.set -> scatter cost ~= asm - no_scatter
-                 (and gather+fold ~= no_scatter - FFT)
+Columns (ms):  adj  asm  fold  rec_adj  d2t  | sum=asm+fold+rec_adj+d2t (~=adj)  | d2t_gather
+  -> whichever of asm/fold/rec_adj/d2t carries the phantom is the rewrite target;
+     d2t_gather shows whether replacing the packing scatter with a gather fixes it.
 
-Default nside ladder is 256,512 -- small enough to compile fast and fit a 5 GB MIG
-slice (nside>=1024 triggers the multi-minute compile / OOM we already saw, and the
-signal is unambiguous at 512). Run on a GPU (the pathology is GPU-specific):
-    pixi run -e gpu python scripts/profile_adjoint.py            # fp64
-    pixi run -e gpu python scripts/profile_adjoint.py --dtype fp32
-CPU-runnable for validation (no pathology there; assembly is cheap).
+GPU-only pathology; default nside 256,512 (slice-safe). Run:
+    pixi run -e gpu python scripts/profile_adjoint.py [--dtype fp32] [--nsides 256,512]
 """
 
 from __future__ import annotations
@@ -39,7 +35,6 @@ LADDER = {256: 384, 512: 768, 1024: 1000, 2048: 1000}
 
 
 def _timed(fn, n: int = 3) -> float:
-    """Best-of-n steady-state seconds (one untimed warmup captures compile)."""
     jax.block_until_ready(fn())
     ts = []
     for _ in range(n):
@@ -50,7 +45,6 @@ def _timed(fn, n: int = 3) -> float:
 
 
 def _safe(fn) -> float | str:
-    """ms, or a short error tag, so one stage can't abort the run."""
     try:
         return _timed(fn) * 1e3
     except Exception as exc:  # noqa: BLE001 -- per-stage in-band failure reporting
@@ -62,40 +56,10 @@ def _safe(fn) -> float | str:
         return f"ERR:{type(exc).__name__}"
 
 
-def _build_assembler(groups, conj_phase, M: int, nrings: int, *, do_fft: bool, do_scatter: bool):
-    """Faithful reconstruction of the spin-0 adjoint ring-assembly under op toggles."""
-    cp = jnp.asarray(conj_phase)
-    G = [(jnp.asarray(g.pix_idx), jnp.asarray(g.ring_idx), jnp.asarray(g.g_plus)) for g in groups]
-
-    def _vg(m, pix, ring, gp):
-        x = m[pix]
-        fr = jnp.fft.fft(x, axis=1) if do_fft else x.astype(jnp.complex128)
-        return fr[:, gp] * cp[:, ring].T  # (n_g, M)
-
-    if do_scatter:
-
-        def assemble(m):
-            V = jnp.zeros((M, nrings), dtype=jnp.complex128)
-            for pix, ring, gp in G:
-                V = V.at[:, ring].set(_vg(m, pix, ring, gp).T, unique_indices=True)
-            return V
-    else:
-
-        def assemble(m):
-            acc = jnp.zeros((), dtype=jnp.complex128)
-            for pix, ring, gp in G:
-                acc = acc + _vg(m, pix, ring, gp).sum()
-            return acc
-
-    return jax.jit(assemble)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dtype", choices=["fp64", "fp32"], default="fp64")
-    ap.add_argument(
-        "--nsides", default="256,512", help="comma-separated (>=1024 risks slow GPU compiles)"
-    )
+    ap.add_argument("--nsides", default="256,512", help=">=1024 risks slow GPU compiles")
     args = ap.parse_args()
 
     jax.config.update("jax_enable_x64", args.dtype == "fp64")
@@ -103,86 +67,120 @@ def main() -> None:
     import numpy as np  # noqa: E402
 
     import jht  # noqa: E402
-    from jht.healpix import RingInfo, _ring_groups, alm_size  # noqa: E402
+    from jht.healpix import RingInfo, _ring_groups, _tri_dense_maps, alm_size  # noqa: E402
     from jht._recursion import adjoint_contract_eo, build_recursion_plan  # noqa: E402
 
     dev = next((d for d in jax.devices() if d.platform == "gpu"), jax.devices("cpu")[0])
-    print(
-        f"profile_adjoint  dtype={args.dtype}  device={dev}  "
-        f"x64={args.dtype == 'fp64'}  jax={jax.__version__}"
-    )
+    print(f"profile_adjoint  dtype={args.dtype}  device={dev}  jax={jax.__version__}")
     hdr = (
-        f"{'nside':>5} {'lmax':>5} {'adj':>9} {'rec_adj':>9} {'asm':>9} {'asm_belt':>9} "
-        f"{'asm_cap':>9} {'no_fft':>9} {'no_scat':>9}  (ms)"
+        f"{'nside':>5} {'lmax':>5} {'adj':>9} {'asm':>8} {'fold':>8} {'rec_adj':>8} "
+        f"{'d2t':>9} {'sum':>9} {'d2t_gath':>9}  (ms)"
     )
     print(hdr + "\n" + "-" * len(hdr))
     print(
-        "  reads: asm ~= adj-rec_adj (faithful);  FFT ~= asm-no_fft;  "
-        "scatter ~= asm-no_scat;  gather+fold ~= no_scat-(asm-no_fft)"
+        "  sum = asm+fold+rec_adj+d2t (~= adj locates the phantom);  d2t = packing SCATTER,"
+        " d2t_gath = candidate gather fix"
     )
 
     rng = np.random.default_rng(0)
 
+    def cplx(shape):
+        return jax.device_put(
+            (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex128)
+        )
+
     def fmt(x):
-        return f"{x:9.1f}" if isinstance(x, float) else f"{x:>9}"
+        return f"{x:.1f}" if isinstance(x, float) else f"{x}"
 
     for nside in [int(x) for x in args.nsides.split(",")]:
         lmax = LADDER.get(nside, min(1000, int(1.5 * nside)))
+        M, K = lmax + 1, alm_size(lmax)
         with jax.default_device(dev):
-            a = rng.standard_normal(alm_size(lmax)) + 1j * rng.standard_normal(alm_size(lmax))
-            a[: lmax + 1] = a[: lmax + 1].real
-            alm = jax.device_put(a.astype(np.complex128))
             geo = RingInfo(nside)
             t_half = 2 * nside
+            nrings = geo.nrings
             plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
             x_half = jnp.asarray(geo.z[:t_half])
-            Vn = jax.device_put(
-                (
-                    rng.standard_normal((lmax + 1, t_half))
-                    + 1j * rng.standard_normal((lmax + 1, t_half))
-                ).astype(np.complex128)
-            )
-            Vs = jax.device_put(
-                (
-                    rng.standard_normal((lmax + 1, t_half))
-                    + 1j * rng.standard_normal((lmax + 1, t_half))
-                ).astype(np.complex128)
-            )
+            groups = _ring_groups(geo, lmax)
+            gather, valid, scatter_flat = _tri_dense_maps(lmax)
 
+            a = rng.standard_normal(K) + 1j * rng.standard_normal(K)
+            a[:M] = a[:M].real
+            alm = jax.device_put(a.astype(np.complex128))
             try:
                 m0 = jax.device_put(np.asarray(jht.synthesis(alm, nside, lmax, 0)))
             except Exception:  # noqa: BLE001
                 m0 = jax.device_put(np.zeros(geo.npix, dtype=np.float64))
+            Vn, Vs = cplx((M, t_half)), cplx((M, t_half))
+            Vfull = cplx((M, nrings))
+            b_dense = cplx((M, M))
 
-            groups = _ring_groups(geo, lmax)
-            belt = [g for g in groups if g.N == 4 * nside]
-            cap = [g for g in groups if g.N != 4 * nside]
-            m_pos = np.arange(lmax + 1)
-            conj_phase = np.conj(np.exp(1j * m_pos[:, None] * geo.phi0[None, :]))
-            M, nrings = lmax + 1, geo.nrings
+            # --- asm: build V from the map (the ring assembly) ---
+            cp = jnp.asarray(np.conj(np.exp(1j * np.arange(M)[:, None] * geo.phi0[None, :])))
+            Gp = [
+                (jnp.asarray(g.pix_idx), jnp.asarray(g.ring_idx), jnp.asarray(g.g_plus))
+                for g in groups
+            ]
 
-            asm_all = _build_assembler(groups, conj_phase, M, nrings, do_fft=True, do_scatter=True)
-            asm_belt = _build_assembler(belt, conj_phase, M, nrings, do_fft=True, do_scatter=True)
-            asm_cap = _build_assembler(cap, conj_phase, M, nrings, do_fft=True, do_scatter=True)
-            asm_nofft = _build_assembler(
-                groups, conj_phase, M, nrings, do_fft=False, do_scatter=True
-            )
-            asm_noscat = _build_assembler(
-                groups, conj_phase, M, nrings, do_fft=True, do_scatter=False
-            )
-            jadjc = jax.jit(lambda vn, vs: adjoint_contract_eo(plan, x_half, vn, vs))
+            @jax.jit
+            def asm(m, Gp=Gp, cp=cp):
+                V = jnp.zeros((M, nrings), dtype=jnp.complex128)
+                for pix, ring, gp in Gp:
+                    V = V.at[:, ring].set(
+                        (jnp.fft.fft(m[pix], axis=1)[:, gp] * cp[:, ring].T).T, unique_indices=True
+                    )
+                return V
+
+            # --- fold_south ---
+            south_src = np.arange(t_half - 1)
+            south_tgt = 4 * nside - 2 - south_src
+            sign_m = jnp.asarray(((-1.0) ** np.arange(M))[:, None])
+            ss, st = jnp.asarray(south_src), jnp.asarray(south_tgt)
+
+            @jax.jit
+            def fold(V):
+                Vs_ = (
+                    jnp.zeros((M, t_half), dtype=jnp.complex128)
+                    .at[:, ss]
+                    .set(V[:, st], unique_indices=True)
+                )
+                return V[:, :t_half], sign_m * Vs_
+
+            # --- recursion adjoint ---
+            rec = jax.jit(lambda vn, vs: adjoint_contract_eo(plan, x_half, vn, vs))
+
+            # --- dense_to_tri: the current SCATTER vs a candidate GATHER ---
+            sj = jnp.asarray(scatter_flat)
+
+            @jax.jit
+            def d2t_scatter(bd):
+                return jnp.zeros(K, dtype=jnp.complex128).at[sj].set(bd.ravel(), mode="drop")
+
+            flat = np.zeros(K, dtype=np.int64)
+            mm, ll = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+            flat[gather[valid]] = (mm * M + ll)[valid]
+            fj = jnp.asarray(flat)
+
+            @jax.jit
+            def d2t_gather(bd):
+                return bd.ravel()[fj]
 
             t_adj = _safe(lambda: jht.adjoint_synthesis(m0, nside, lmax, 0))
-            t_radj = _safe(lambda: jadjc(Vn, Vs))
-            t_asm = _safe(lambda: asm_all(m0))
-            t_belt = _safe(lambda: asm_belt(m0))
-            t_cap = _safe(lambda: asm_cap(m0))
-            t_nofft = _safe(lambda: asm_nofft(m0))
-            t_noscat = _safe(lambda: asm_noscat(m0))
+            t_asm = _safe(lambda: asm(m0))
+            t_fold = _safe(lambda: fold(Vfull))
+            t_rec = _safe(lambda: rec(Vn, Vs))
+            t_d2t = _safe(lambda: d2t_scatter(b_dense))
+            t_d2g = _safe(lambda: d2t_gather(b_dense))
 
+        parts = [t_asm, t_fold, t_rec, t_d2t]
+        s = (
+            sum(p for p in parts if isinstance(p, float))
+            if all(isinstance(p, float) for p in parts)
+            else "-"
+        )
         print(
-            f"{nside:>5} {lmax:>5} {fmt(t_adj)} {fmt(t_radj)} {fmt(t_asm)} {fmt(t_belt)} "
-            f"{fmt(t_cap)} {fmt(t_nofft)} {fmt(t_noscat)}",
+            f"{nside:>5} {lmax:>5} {fmt(t_adj):>9} {fmt(t_asm):>8} {fmt(t_fold):>8} "
+            f"{fmt(t_rec):>8} {fmt(t_d2t):>9} {fmt(s):>9} {fmt(t_d2g):>9}",
             flush=True,
         )
 
