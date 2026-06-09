@@ -102,7 +102,7 @@ def main() -> None:
             plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
             x_half = jnp.asarray(geo.z[:t_half])
             groups = _ring_groups(geo, lmax)
-            gather, valid, scatter_flat = _tri_dense_maps(lmax)
+            *_, pack = _tri_dense_maps(lmax)  # (gather, valid, pack); pack = dense->tri gather idx
 
             a = rng.standard_normal(K) + 1j * rng.standard_normal(K)
             a[:M] = a[:M].real
@@ -149,17 +149,16 @@ def main() -> None:
             # --- recursion adjoint ---
             rec = jax.jit(lambda vn, vs: adjoint_contract_eo(plan, x_half, vn, vs))
 
-            # --- dense_to_tri: the current SCATTER vs a candidate GATHER ---
+            # --- dense_to_tri: the OLD scatter (rebuilt from pack) vs the gather now shipped ---
+            scatter_flat = np.full(M * M, K, dtype=np.int64)
+            scatter_flat[pack] = np.arange(K)  # inverse of pack: dense-flat -> tri (else drop)
             sj = jnp.asarray(scatter_flat)
 
             @jax.jit
             def d2t_scatter(bd):
                 return jnp.zeros(K, dtype=jnp.complex128).at[sj].set(bd.ravel(), mode="drop")
 
-            flat = np.zeros(K, dtype=np.int64)
-            mm, ll = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
-            flat[gather[valid]] = (mm * M + ll)[valid]
-            fj = jnp.asarray(flat)
+            fj = jnp.asarray(pack)
 
             @jax.jit
             def d2t_gather(bd):
