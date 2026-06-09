@@ -245,6 +245,11 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
                 ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
                 Vg = fr[:, g.g_plus] * ph  # (n_g, M)
                 V = V.at[:, g.ring_idx].set(Vg.T, unique_indices=True)
+            # Force V to materialize before the recursion scan: without this XLA
+            # rematerializes the unrolled ring-assembly *inside* the adjoint scan in
+            # fp64 (the assembly feeds the scan, unlike synthesis), a ~13x GPU
+            # slowdown -- profiled, see docs/gpu.md. Numerically the identity.
+            V = jax.lax.optimization_barrier(V)
             Vn, Vs = fold_south(V)
             return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs))
 
@@ -286,6 +291,8 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
             Fmb = jnp.conj(W[:, g.g_minus]) * ph
             Vp = Vp.at[:, g.ring_idx].set(Fpb.T, unique_indices=True)
             Vm = Vm.at[:, g.ring_idx].set(Fmb.T, unique_indices=True)
+        # materialize Vp/Vm before the recursion scan (see the spin-0 adjoint note).
+        Vp, Vm = jax.lax.optimization_barrier((Vp, Vm))
         Vpn, Sp = fold_south(Vp)
         Vmn, Sm = fold_south(Vm)
         p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm)
