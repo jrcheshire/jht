@@ -30,7 +30,7 @@ import numpy as np
 
 from ._nufft import NufftPlan, _next_size, nufft2d1, nufft2d2, nufft_plan
 from ._recursion import RecursionPlan, adjoint_contract, build_recursion_plan, synth_contract
-from .healpix import _tri_dense_maps, alm_metric_weight, alm_size
+from .healpix import _tri_dense_maps, alm_metric_weight
 
 TWO_PI = 2.0 * np.pi
 
@@ -50,7 +50,7 @@ class _OffgridPrep(NamedTuple):
     refl: np.ndarray  # their reflected north indices
     gather: np.ndarray  # tri<->dense index maps
     valid: np.ndarray
-    scatter_flat: np.ndarray
+    pack: np.ndarray  # dense.ravel() -> tri gather index (dense_to_tri)
     gmetric: np.ndarray  # (alm_size,) the (2 - delta_m0) weight
 
 
@@ -69,11 +69,11 @@ def _prepare(lmax: int, spin: int, epsilon: float) -> _OffgridPrep:
     sign_m = ((-1.0) ** np.abs(mvals)) * ((-1.0) ** spin)
     south_i = np.arange(ntheta_s, ntheta_d)
     refl = ntheta_d - south_i
-    gather, valid, scatter_flat = _tri_dense_maps(lmax)
+    gather, valid, pack = _tri_dense_maps(lmax)
     return _OffgridPrep(
         lmax, spin, 1 if spin == 0 else 2, ntheta_s, ntheta_d, x_cc,
         plan_pos, plan_neg, nplan, sign_m, south_i, refl,
-        gather, valid, scatter_flat, alm_metric_weight(lmax),
+        gather, valid, pack, alm_metric_weight(lmax),
     )
 
 
@@ -82,8 +82,7 @@ def _tri_to_dense(p: _OffgridPrep, alm):
 
 
 def _dense_to_tri(p: _OffgridPrep, dense):
-    out = jnp.zeros(alm_size(p.lmax), dtype=jnp.complex128)
-    return out.at[jnp.asarray(p.scatter_flat)].set(dense.ravel(), mode="drop")
+    return dense.ravel()[jnp.asarray(p.pack)]  # gather, not scatter (fp64 GPU; see healpix)
 
 
 def _channels(p: _OffgridPrep, alm):

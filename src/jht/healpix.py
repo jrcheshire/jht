@@ -75,25 +75,28 @@ def alm_metric_weight(lmax: int) -> np.ndarray:
 def _tri_dense_maps(lmax: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Index maps between healpy-triangular a_lm and the dense ``(M, lmax+1)`` grid.
 
-    Returns ``(gather_idx, valid_mask, scatter_flat)``:
-    * ``gather_idx[m,l]`` -> flat triangular index (0 where invalid);
+    Returns ``(gather_idx, valid_mask, pack_idx)``:
+    * ``gather_idx[m,l]`` -> flat triangular index (0 where invalid), for
+      ``tri_to_dense`` (alm -> dense, a gather);
     * ``valid_mask[m,l]`` -> True where ``l >= m``;
-    * ``scatter_flat`` is ``gather_idx`` flattened with invalid entries pointed
-      out of bounds (``alm_size``) for ``.at[...].set(..., mode='drop')``.
+    * ``pack_idx[k]`` -> flat dense index ``m*M + l`` of triangular entry ``k``, for
+      ``dense_to_tri`` (dense -> alm) as a **gather** ``dense.ravel()[pack_idx]``.
+      A scatter (``at[...].set(mode='drop')``) here is catastrophically slow in fp64
+      on GPU -- ~38000x the gather, profiled; see ``docs/gpu.md`` -- so the adjoint
+      packs via this gather, mirroring the forward.
     """
     M = lmax + 1
     gather = np.zeros((M, M), dtype=np.int64)
     valid = np.zeros((M, M), dtype=bool)
-    K = alm_size(lmax)
-    scatter = np.full((M, M), K, dtype=np.int64)
+    pack = np.zeros(alm_size(lmax), dtype=np.int64)
     for m in range(M):
         base = alm_column_base(m, lmax)
         ells = np.arange(m, lmax + 1)
         idx = base + (ells - m)
         gather[m, m:] = idx
         valid[m, m:] = True
-        scatter[m, m:] = idx
-    return gather, valid, scatter.ravel()
+        pack[idx] = m * M + ells
+    return gather, valid, pack
 
 
 # --------------------------------------------------------------------------- #
@@ -183,11 +186,10 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     geo = RingInfo(nside)
     npix = geo.npix
     groups = _ring_groups(geo, lmax)
-    gather, valid, scatter_flat = _tri_dense_maps(lmax)
+    gather, valid, pack = _tri_dense_maps(lmax)
     gather_j = jnp.asarray(gather)
     valid_j = jnp.asarray(valid)
-    scatter_j = jnp.asarray(scatter_flat)
-    K = alm_size(lmax)
+    pack_j = jnp.asarray(pack)
 
     # per-(m, ring) azimuth phase e^{i m phi0_r}
     m_pos = np.arange(lmax + 1)
@@ -216,9 +218,8 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     def tri_to_dense(alm):  # (K,) -> (M, lmax+1)
         return jnp.where(valid_j, alm[gather_j], 0.0 + 0.0j)
 
-    def dense_to_tri(b_dense):  # (M, lmax+1) -> (K,)
-        out = jnp.zeros(K, dtype=jnp.complex128)
-        return out.at[scatter_j].set(b_dense.ravel(), mode="drop")
+    def dense_to_tri(b_dense):  # (M, lmax+1) -> (K,): gather, not scatter (fp64 GPU)
+        return b_dense.ravel()[pack_j]
 
     if spin == 0:
         plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
