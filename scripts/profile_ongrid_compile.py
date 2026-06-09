@@ -77,6 +77,9 @@ def main() -> None:
     ap.add_argument("--dtype", choices=["fp64", "fp32"], default="fp64")
     ap.add_argument("--nsides", default="1024,2048", help="2048 is the ptxas-FAIL target")
     ap.add_argument("--bitcheck-nside", type=int, default=256)
+    ap.add_argument(
+        "--skip-full", action="store_true", help="skip the current-scatter candidate (slowest to compile)"
+    )
     args = ap.parse_args()
 
     jax.config.update("jax_enable_x64", args.dtype == "fp64")
@@ -156,20 +159,26 @@ def main() -> None:
 
         return G, asm_full, asm_nogath, asm_gather
 
-    # --- bit-identity gate (small nside, CPU-cheap): the 2b assembly == the scatter ---
+    # --- correctness gate (small nside): the 2b combined-gather assembly == the scatter.
+    # allclose, not array_equal: the two candidates each run their OWN ifft, and cuFFT is
+    # not bit-reproducible across separate compilations on GPU (~1e-13 ULP), so an exact
+    # compare false-alarms on GPU though the assembly (a pure permutation) is correct. In
+    # the real fix there is ONE ifft per ring and gather-vs-scatter of it is bitwise exact.
     nb = args.bitcheck_nside
     lb = LADDER.get(nb, min(1000, int(1.5 * nb)))
     with jax.default_device(dev):
         Gb, full_b, _ng_b, gath_b = build(nb, lb)
-        eq = bool(jnp.array_equal(full_b(Gb), gath_b(Gb)))
-    print(f"  asm_gather == asm_full (bit-identical, nside={nb}): {eq}")
+        a, b = full_b(Gb), gath_b(Gb)
+        maxdiff = float(jnp.max(jnp.abs(a - b)))
+        ok = bool(jnp.allclose(a, b, rtol=0.0, atol=1e-12))
+    print(f"  asm_gather ~= asm_full (allclose, nside={nb}): {ok}  (max|diff|={maxdiff:.2e})")
 
     for nside in [int(x) for x in args.nsides.split(",")]:
         lmax = LADDER.get(nside, min(1000, int(1.5 * nside)))
         _M, _K = lmax + 1, alm_size(lmax)
         with jax.default_device(dev):
             G, asm_full, asm_nogath, asm_gather = build(nside, lmax)
-            fc, fr = _compile_run(lambda: asm_full(G))
+            fc, fr = ("skip", "skip") if args.skip_full else _compile_run(lambda: asm_full(G))
             nc, nr = _compile_run(lambda: asm_nogath(G))
             gc, gr = _compile_run(lambda: asm_gather(G))
         print(
