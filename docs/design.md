@@ -1,10 +1,9 @@
 # jht — Technical design notes
 
-Working design notes for the JAX-native SHT. This records algorithm choices,
-conventions, and accuracy decisions. Phase 0 (feasibility) and Phase 1
-(performance + accuracy) are implemented; the measured accuracy contract lives
-in `docs/accuracy.md` and the performance characterization in
-`docs/performance.md`.
+Design notes for the JAX-native SHT — the algorithm choices, conventions, and
+accuracy decisions. The transforms are implemented and validated; the measured
+accuracy contract lives in `docs/accuracy.md` and the performance characterization
+in `docs/performance.md`.
 
 ## Accuracy tiers (the contract)
 
@@ -17,9 +16,9 @@ approximate. Three accuracy regimes matter:
 | + ring weights | jht's own min-norm ring weights (`jht.weights`) | bare ~2–12e-4 | Closes toward ducc |
 | + Jacobi iteration | `analysis` iterative refinement, band-limited | **~1e-13** | ducc-class |
 
-- **Phase-0 target (met):** reach the *bare floor with no structural defect* —
-  spin-2 sits at ~1e-3 like spin-0, NOT s2fft's 3–28%.
-- **Phase-1 accuracy (met):** ring weights + iteration reach machine precision on
+- **Bare floor, no structural defect:** spin-2 sits at ~1e-3 like spin-0 — no
+  spin-2-specific accuracy defect.
+- **Weighted accuracy:** ring weights + iteration reach machine precision on
   band-limited maps, matching `healpy.map2alm(use_weights=True)`. The **committed
   a-priori contract is weighted + niter=3 ≤ 1e-4** (measured ~1e-13, ~9 orders of
   headroom). Full numbers + the ring-weight algorithm: `docs/accuracy.md`.
@@ -27,11 +26,11 @@ approximate. Three accuracy regimes matter:
   (different undocumented solver; reproducing it would also break the no-files
   contract). They are the minimum-norm per-ring correction making the m=0
   quadrature exact to `Lw = 2·nside`; validated end-to-end, not by array match.
-- ducc remains the production oracle in bk-jax; jht serves the GPU/diff tier
+- ducc remains the high-accuracy CPU reference; jht serves the GPU/diff tier
   where ~1e-3 is acceptable. Tolerances are a-priori and not relaxed without
   sign-off (standing rule).
 
-## Algorithm skeleton (to be settled in Phase 0/1)
+## Algorithm skeleton
 
 The standard analysis/synthesis structure:
 - **Synthesis (aₗₘ → map):** for each ring (fixed colatitude θ), evaluate the
@@ -44,20 +43,20 @@ The standard analysis/synthesis structure:
 
 Design choices to make empirically:
 - **Dense-Legendre vs FFT-per-ring + on-the-fly recursion** — memory vs speed
-  at BK ℓ_max. Dense Pₗₘ tables may be fine at ℓ_max≲1000 on GPU; measure.
+  at ℓ_max ≲ 1000. Dense Pₗₘ tables may be fine at that ℓ_max on GPU; measure.
 - **Real-aₗₘ vs complex-aₗₘ** internal representation.
 - Batching over realizations (vmap) for the sim/forecast use cases.
 
-Reference algorithms (study, don't copy a broken codebase): **libsharp /
+Reference algorithms (study the published methods): **libsharp /
 Kostelec–Rockmore** for the recursion structure *and* the stability scaling
 (the 3-term ℓ-recursion + enhanced-exponent — see "The crux" below); ducc for
-ring weights + iteration; Price & McEwen only for the JAX branch-free renorm
-*technique* (NOT their m-recursion, the suspected s2fft-defect home).
+ring weights + iteration; Price & McEwen for the JAX branch-free renorm
+*technique* (the recursion only, not their m-recursion).
 
 ## The crux: two risks (recursion stability + spin-2 analysis quadrature)
 
-The 2026-06 literature dive corrected the project's risk model. There are two
-distinct risks, and **the recursion is necessary but is not the make-or-break.**
+Two distinct risks drive the design, and **the recursion is necessary but is not
+the make-or-break.**
 
 ### Risk 1 — recursion stability to ℓ_max~1000 (necessary, table-stakes)
 
@@ -81,24 +80,22 @@ branch, XLA-hostile).
 
 ### Risk 2 — spin-2 HEALPix analysis quadrature (the actual make-or-break)
 
-This is where s2fft fails, and it is *not* the recursion: s2fft already
-rescales, spin-0 (the identical recursion) is machine-precision, and its spin-2
-single-mode errors appear at ℓ=8/16/32, *shrink* with ℓ (35→28→22%), and sit far
-below the ℓ≤1.5·nside ceiling — none of which fit underflow. The signature
-(`m≈ℓ` clean, `m<ℓ` fails O(10%)) is an **aliasing / polar-folding +
-missing-ring-weights** defect in the spin-2 map2alm, compounded by an unweighted
-Jacobi iteration that stalls (upstream issue #269: "iterations don't fix it").
-jht must own the **weighted spin-2 analysis** and validate it **per-(ℓ,m), below
-the ℓ≤1.5·nside ceiling**, so recursion / quadrature / band-ceiling errors are
-never conflated — single-mode sweeps across *all* m, never round-trip totals
-(which mask localized leakage). **Test both risks explicitly and early.**
+The harder risk is *not* the recursion (spin-0, the identical recursion, is
+machine-precision) but the **spin-2 analysis quadrature**. The failure mode it
+guards against is a single-mode `m<ℓ` leakage signature — `m≈ℓ` clean, `m<ℓ` off
+by O(10%) — the symptom of an **aliasing / polar-folding + missing-ring-weights**
+defect in spin-2 map2alm, which an unweighted Jacobi iteration does not fix. jht
+therefore owns the **weighted spin-2 analysis** and validates it **per-(ℓ,m),
+below the ℓ≤1.5·nside ceiling**, so recursion / quadrature / band-ceiling errors
+are never conflated — single-mode sweeps across *all* m, never round-trip totals
+(which mask localized leakage). **Both risks are tested explicitly.**
 
 ## Conventions (verified vs healpy 1.19.0 / ducc0 0.41.0 — pin in code)
 
-Leaving these implicit is how `bk-jax` accumulated sign/convention bugs. These
-were checked **empirically against both oracles** during the 2026-06 scoping
-(healpy ≡ ducc on the transform seam — no adapter needed; the only divergence is
-the IAU U-flip, which lives at the *application* layer):
+Leaving these implicit is a classic source of sign/convention bugs. They are
+checked **empirically against both oracles** (healpy ≡ ducc on the transform seam
+— no adapter needed; the only divergence is the IAU U-flip, which lives at the
+*application* layer):
 
 - **aₗₘ layout:** m-major triangular, only m≥0 stored (real maps → conjugate
   symmetry `a_{ℓ,−m} = (−1)^m conj(a_{ℓ,m})`); index
@@ -114,10 +111,10 @@ the IAU U-flip, which lives at the *application* layer):
   ~5e-13, same sign. *(Re-verify these signs against the HEALPix polarization
   primer at implementation time — historically the dangerous ones.)*
 - **Polarization U-sign:** jht is **HEALPix-internal (COSMO)-native** (= healpy
-  default, = bk-jax's internal storage); `U_IAU = −U_HEALPix`. Flip only at an
+  default); `U_IAU = −U_HEALPix`. Flip only at an
   explicit I/O boundary if a consumer asks for IAU.
 
-## Differentiability (Phase 2 — resolved)
+## Differentiability
 
 The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
 **native** autodiff. jht registers **no** custom VJP/JVP rule.
@@ -132,10 +129,10 @@ The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
   of it. Forward scatters carry `unique_indices=True` (the indices are genuinely
   unique) to keep the kernels transpose-friendly; forward numerics are unchanged.
 - **Two distinct operators, kept separate.** `adjoint_synthesis = Sᵀ = Yᵀ` is the
-  exact, weight-free **strict transpose** (the bk-jax seam / the operator a CG
+  exact, weight-free **strict transpose** (the operator seam / the operator a CG
   solve needs); `analysis` (`A = SᵀW`, weighted + iterative, aka `map2alm`) is the
   *approximate inverse*. Neither is the AD cotangent — keep all three distinct.
-- **The convention (the `2·conj` subtlety that bit bk-jax), pinned.** The packed
+- **The convention (the `2·conj` subtlety), pinned.** The packed
   aₗₘ store only m≥0; a real field's m<0 half is implied, so the alm inner product
   carries the diagonal metric `G = 2 − δ_{m0}` (`jht.healpix.alm_metric_weight`).
   JAX's native reverse-mode returns the Euclidean cotangent **in this packing**:
@@ -164,7 +161,7 @@ The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
   `jit` / `vmap` cleanliness (note: pre-warm the `_prepare` cache before `vmap`,
   else a first-trace-inside-vmap leaks a tracer); end-to-end map→alm→Cℓ grad.
 - Geometry/pointing differentiability is the **off-grid NUFFT** story
-  (Phase 4), not the on-grid core.
+  (`docs/offgrid.md`), not the on-grid core.
 
 ## Explicit non-goals (keep the surface small)
 
@@ -173,11 +170,11 @@ The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
 - A compiled (C++/CUDA) kernel. Pure JAX is the dependency-control point; only
   revisit under a deliberate, documented decision.
 
-## Validation harness (planned)
+## Validation harness
 
 - Parity tests vs **healpy** (`alm2map`/`map2alm`, `pol=True`) and **ducc0**
   for every transform, at documented a-priori tolerances.
 - Single-mode sweeps (all m, ℓ up to ~1000) to catch localized leakage that
-  round-trip totals hide — the diagnostic that exposed s2fft.
-- A `DISCREPANCIES.md` log (mirroring bk-jax) for any residual mismatch: where
-  seen, suspected cause, what would close it.
+  round-trip totals hide.
+- A `DISCREPANCIES.md` log for any residual mismatch: where seen, suspected
+  cause, what would close it.

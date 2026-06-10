@@ -1,120 +1,38 @@
-# Why jht exists — the decision record
+# Why jht exists
 
-Captured 2026-06-06, from the conversation that spun this repo out of `bk-jax`.
-Recorded so a future session does not relitigate the "why" or repeat the
-evaluation that's already been done.
+jht is a clean-room, pure-JAX spherical harmonic transform. The established
+high-accuracy libraries (ducc0, healpy) are excellent but are compiled, CPU-only
+C++. That leaves a gap for three kinds of work:
 
-## The recurring constraint
+- **GPU execution.** Forecasting sweeps, field-level inference (an inner
+  Wiener-filter solve, run many times), and large simulation ensembles are
+  accelerator-hungry; a CPU-only transform caps them at CPU throughput.
+- **End-to-end differentiability.** JAX-native autodiff lets gradients flow
+  through the transform — including, on the off-grid path, through the evaluation
+  pointings themselves — which a compiled C++ FFI does not expose.
+- **Dependency control.** Pure JAX + numpy installs with `pip` and needs no
+  C++/CUDA build toolchain, removing a recurring source of CI and install
+  breakage.
 
-`bk-jax` (the JAX BICEP/Keck pipeline) does its spherical harmonic transforms
-through **ducc0**, Martin Reinecke's C++ library, wrapped in a hand-written XLA
-FFI custom call. ducc is the gold standard for SHT accuracy and CPU speed — but
-the same constraint keeps surfacing across unrelated efforts:
+The leading JAX-native SHT (s2fft) handles spin-0 well, but at the time jht was
+written its **spin-2 HEALPix analysis had a precision gap** at production
+band-limits — and spin-2 (polarization) is exactly the case that matters here.
+Rather than depend on, or fork, a large codebase that was inaccurate in the
+corner we needed, jht reimplements the transform clean-room — informed by the
+published methods (libsharp / Kostelec–Rockmore for the spin-2-safe ℓ-recursion;
+the Price–McEwen branch-free renormalization technique) — with spin-2
+correctness as an explicit validation gate.
 
-1. **CPU-only.** The directions bk-jax most wants to grow into are GPU-hungry:
-   - differentiable forecasting (sweeping instrument knobs through the full
-     R → purification → BPCM → likelihood stack),
-   - field-level inference (a MUSE bridge; the inner Wiener-filter MAP solve is
-     a CG over `(S⁻¹ + RᵀN⁻¹R)`, run many times),
-   - large sim ensembles.
-   ducc cannot run on GPU, so all of this is capped at CPU throughput.
+## Scope, honestly
 
-2. **A black box we don't control.** ducc is vendored as a submodule and
-   wrapped in our own FFI — that is *build* control, not *code* control. Its
-   internals are unmodifiable C++. Concretely, off-grid pointing (`loc`)
-   tangents raise `NotImplementedError`, which blocks differentiating through
-   detector geometry — exactly the kind of thing a JAX-native transform would
-   give for free.
+HEALPix has no sampling theorem, so any HEALPix SHT is approximate. jht targets
+the tier where the ~1e-3 sampling floor (closed to ~1e-13 on band-limited maps
+with ring weights + iteration) is acceptable — GPU-accelerated, differentiable
+analysis — rather than displacing the most accuracy-critical (~1e-4) CPU
+production pipelines. Owning a transform means owning its numerics, chiefly
+recursion stability to ℓ_max ~ 1000 (the classic high-ℓ underflow, solved with
+libsharp-style log / X-number scaling) and the quadrature weights; both are
+bounded for the spin-0/2, ℓ_max ≲ 1000, nside ≤ ~2048 regime jht targets.
 
-3. **A build tax.** The C++ / scikit-build / CUDA / submodule toolchain has
-   repeatedly broken CI and local installs (config-setting rejections, macOS
-   wheel-tag mismatches, flaky submodule fetches). Every one is fixable, but
-   it's a standing maintenance cost that a pure-JAX library simply doesn't have.
-
-The user's framing: *"This is not the first time our ambitions have been
-stymied by the C-shaped black box that quacks and does harmonic transforms,"*
-plus a clear preference for **being in control of dependencies**.
-
-## Why not just use s2fft
-
-s2fft (Price & McEwen) is the leading JAX-native SHT and was the obvious
-candidate. It was evaluated (the bk-jax "M0 SHT spike", 2026-05-03) and
-**rejected for our use**:
-
-- Its **spin-2 HEALPix inverse has a structural precision defect**: measured
-  3–28% error at production ℓ (L=257–769, nside 128–256), versus its own
-  documented ~1e-3. The failure pattern: only `m ≈ ℓ` single modes pass;
-  `m < ℓ` fail by O(10%). Spin-0 is machine-precision fine — the bug is
-  specific to the spin-±2 + HEALPix corner, i.e. **polarization**, which is the
-  whole point for CMB B-modes.
-  - **2026-06 root-cause refinement** (literature dive for the jht spike): the
-    defect is in s2fft's spin-2 **analysis quadrature**, NOT the recursion. The
-    original "recursion underflow" hypothesis is refuted — s2fft *does* rescale
-    its Wigner-d recursion (`otf_recursions.py`), the failures appear at ℓ=8/16/32
-    and *shrink* with ℓ (35→28→22%), and they sit far below the ℓ≤1.5·nside
-    ceiling — none of which fit underflow. It fits an aliasing/polar-folding +
-    missing-ring-weights defect, with an unweighted Jacobi iteration that stalls
-    (upstream issue [#269], open/parked: "iterations don't fix it"). Implication
-    for jht: own the recursion (table-stakes) AND the weighted spin-2 analysis
-    (the real differentiator). See `docs/design.md`.
-- jax-healpy delegates to s2fft for SHTs, so it inherits the same bug — not a
-  viable wrapper alternative.
-- As of 2026-06 s2fft is **still at v1.4.0 (12 Feb 2026)** — the evaluation
-  spike ran on v1.3.0, and the v1.3.0→v1.4.0 diff is CUDA/build-only (spin-2
-  accuracy byte-identical). The relevant accuracy issues are triaged and parked
-  by the maintainers ("we don't have time"), and the PR queue is stagnant.
-
-So: **don't depend on s2fft** (its broken corner is exactly our corner, and
-it's unmaintained on that front), and **don't fork it** either — inheriting a
-large codebase that's broken where you need it and that you find hard to follow
-is the *opposite* of dependency control.
-
-## What the s2fft evaluation did prove
-
-Importantly, the spike **validated the architecture**, not just rejected a
-library. s2fft's `inverse_jax` was JIT-clean (1 eqn, 0 callbacks), spin-0
-matched healpy at 3.9e-13, the VJP was finite and well-scaled, and it was only
-~1.7× ducc on CPU at a small grid. A JAX-native SHT *integrates cleanly* into
-this kind of pipeline. The concept works; one library's spin-2 implementation
-does not.
-
-## The reframe that makes this tractable
-
-The first JAX SHT **does not have to replace ducc**:
-
-- **ducc stays** on the ~1e-4 purity / E→B-leakage-critical production path in
-  bk-jax. That accuracy is person-decades of expert tuning; it is not the thing
-  to risk first.
-- **jht targets the tier ducc structurally can't serve** — GPU forecast sweeps,
-  the MUSE inner solve, fully-differentiable geometry — where the HEALPix ~1e-3
-  accuracy floor is perfectly acceptable.
-
-That collapses the bar from "match ducc to machine precision" down to
-"BK-regime spin-0/2 on HEALPix, good-enough + GPU + differentiable, with no
-structural defect" — which is genuinely achievable, and is exactly the gap that
-keeps biting.
-
-## Honest costs (so the decision is eyes-open)
-
-- Owning a transform means owning its **numerics forever** — ring quadrature
-  weights and, especially, **recursion stability to ℓ_max~1000** (the classic
-  underflow problem; libsharp solves it with log/X-number scaling). Bounded for
-  the BK regime, but a real, permanent surface.
-- ducc is already fast on CPU, so jht offers **no CPU win** — the payoff is
-  purely on GPU, and that GPU payoff currently lands on FairShare-constrained
-  Cannon GPUs (development and benchmarking themselves are cheap).
-- jht is the **on-grid SHT only**; the sim-forward off-grid NUFFT is a separate
-  capability (deferred to Phase 4).
-
-These are why the plan leads with a cheap, hard-gated **feasibility spike**
-(ROADMAP Phase 0) rather than a commitment: it converts "should we own an SHT?"
-from a values/vibes question into data, for ~2 days of work.
-
-## Lineage
-
-- Motivating consumer: `~/bicepkeck/bk-jax`.
-- s2fft spike findings live in bk-jax memory
-  (`feedback_s2fft_spin2_healpix_defect`) and the build-tax history in
-  `reference_bk_jax_build_toolchain`.
-- Downstream science drivers that want the GPU/diff transform: the bk-jax
-  differentiable-forecast and MUSE-bridge directions.
+See `docs/design.md` for the algorithm and conventions, and `docs/accuracy.md`
+for the measured accuracy and the validation contract.

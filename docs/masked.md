@@ -45,7 +45,7 @@ are not recoverable from the data; CG from `x0=0` returns the minimum-norm
 solution, and an optional Tikhonov `reg` (`A → A + reg·I` in the real-DOF
 metric) stabilises ill-conditioned / apodized masks (trading bias for variance).
 
-### 3. `wiener` — the Wiener filter / MUSE inner solve
+### 3. `wiener` — the Wiener filter / field-level-inference inner solve
 
 Add a noise model and a signal prior. For the data model `m = S a + n` with
 per-pixel inverse-noise `N⁻¹` and a diagonal Gaussian prior `a ~ N(0, C)`,
@@ -72,12 +72,12 @@ with `ω₁ ~ N(0, I)` in pixel space and `ξ ~ N(0, I)` in `x`-space. Then
 `Cov(s) = A_x + D`, so the draw has mean `â` and covariance `(A_x + D)⁻¹` — the
 posterior. (The `s₁` factorization is exact because `T·Sᵀ` is the Euclidean
 transpose of `S·T⁻¹` — the gated operator symmetry.) This is the stochastic piece
-the full MUSE gradient needs.
+a full field-level-inference gradient needs.
 
 ## The inner-product subtlety and the isometry `T`
 
 `S`/`Sᵀ` (`jht.healpix`) are adjoint in the **`(2−δ_m0)`-weighted** a_lm inner
-product, not the Euclidean one (the bk-jax `2·conj` gotcha). So `A` is
+product, not the Euclidean one (the `2·conj` gotcha). So `A` is
 Hermitian-PD under `⟨·,·⟩_w`, not Euclidean, and stock conjugate gradient
 (which assumes Euclidean) would solve the wrong system.
 
@@ -156,7 +156,7 @@ data and so *hurts* an exact solve** — apodization's home is the *pseudo*-a_lm
 (it suppresses ringing), not the deconvolution. spin-2 behaves like spin-0 modulo
 the additional E↔B ambiguous-mode floor (see `DISCREPANCIES.md`).
 
-## The Wiener win — characterised (the MUSE inner-solve tier)
+## The Wiener win — characterised (the field-level-inference inner-solve tier)
 
 `reg=0` `deconvolve` is exact where the cut leaves modes constrained but
 **amplifies near-null modes** on aggressive / apodized cuts (the `apod t<0.4`
@@ -183,7 +183,7 @@ The story: comparable on mild cuts (high fsky — both sit at the injected-noise
 floor, the prior barely shrinks), and a large Wiener advantage once the cut grows
 or apodization down-weights the data and the unregularized `deconvolve` diverges
 (up to ~100×). The prior trades the blown-up variance for prior-controlled bias,
-keeping the solve bounded. This is the MUSE field-level inference tier;
+keeping the solve bounded. This is the field-level-inference tier;
 `constrained_realization` supplies the posterior draws its gradient needs. It
 resolves the mitigation path flagged for the spin-2 E/B ambiguous-mode limitation
 in `DISCREPANCIES.md`.
@@ -193,5 +193,5 @@ in `DISCREPANCIES.md`.
 This rung delivers the masked operators (`pseudo_alm`, `deconvolve`) and the
 Wiener filter + constrained realizations (`wiener`, `constrained_realization`).
 What remains explicitly out: off-grid (NUFFT) synthesis at arbitrary pointings is
-a separate capability (see `ROADMAP.md` Phase 4), not part of the on-grid masked
+a separate capability (see `docs/offgrid.md`), not part of the on-grid masked
 analysis.

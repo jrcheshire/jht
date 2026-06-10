@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Docs** — rewrote `docs/` for a public audience: removed consumer-specific
+  (BICEP/Keck, bk-jax) and development-process references, trimmed `motivation.md`
+  to a concise justification, and de-jargoned (e.g. MUSE → field-level inference).
+  No code or API changes.
+
 ## [0.1.1] - 2026-06-10
 
 ### Added

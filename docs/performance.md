@@ -1,20 +1,14 @@
-# jht — Phase-1 performance
+# jht — performance
 
-Performance characterization of the on-grid HEALPix transforms after the Phase-1
-hardening (vectorized recursion + jit + batched ring FFTs + equatorial symmetry).
-The Phase-0 spike was correctness-first and eager: a single nside=32 single-mode
-sweep burned **30+ CPU-minutes**. Phase 1 makes the transforms production-fast
-while keeping every Phase-0 accuracy gate green at its original tolerance
-(numerics are unchanged — see `tests/test_vectorized.py` for the
-fast-path-vs-eager-reference equivalence, and `tests/test_healpix.py` for the
-healpy/ducc parity).
+Performance characterization of the on-grid HEALPix transforms: a vectorized
+ℓ-recursion + jit + batched per-ring FFTs + equatorial (N/S) symmetry. Numerics
+are unchanged from the eager reference implementation — `tests/test_vectorized.py`
+gates the fast path against that reference, and `tests/test_healpix.py` the
+healpy/ducc parity.
 
-**Headline:** the eager-dispatch penalty is gone. nside=32 transforms now run in
-**~1–2 ms** (was the dominant cost of that 30-min sweep); the full test suite went
-**139 s → ~60 s** (now dominated by the slow eager *reference oracle* the
-equivalence tests deliberately exercise, not the fast path). GPU timing is
-deferred to Phase 3 (JAX-metal float64 is unreliable); the code is written
-jit/vmap-clean and is GPU-ready.
+**Headline:** small transforms run in **~1–2 ms** (nside=32), dominated by the
+ℓ-recursion that jit + vectorization make fast. The code is jit/vmap-clean and
+runs unchanged on GPU — see "GPU performance" below.
 
 ## What changed (and why it was slow)
 
@@ -51,7 +45,7 @@ Reproduce with `pixi run python scripts/bench_transforms.py` (Apple-silicon
 osx-arm64; jax 0.9.2). `compile_s` is the first-call wall time (trace + XLA
 compile, cached thereafter); `synth`/`adj`/`map2alm` are steady-state best-of-N
 jitted run times; `map2alm` uses `niter=3` (= 1 + 2·niter = 7 transform passes).
-`lmax` follows the BK regime (~1.5·nside, capped at 1000). peak RSS is the
+`lmax` follows the usual band-limit (~1.5·nside, capped at 1000). peak RSS is the
 process high-water mark (cumulative, single process — indicative, not per-call).
 
 | nside | lmax | npix | spin | compile (s) | synth (ms) | adj (ms) | map2alm (ms) | peak RSS (MB) |
@@ -114,16 +108,15 @@ makes nside=2048 compile on GPU (see below) — bit-identical, runtime unaffecte
   on-the-fly choice). A memory-gated cached-λ fast path for small nside is an
   easy future optimization.
 - Ring quadrature weights, the full nside/lmax/spin accuracy matrix, and
-  partial-sky (masked) analysis were the Phase-1 accuracy rungs (done — see
-  `docs/accuracy.md`, `docs/masked.md`); differentiability is Phase 2; GPU is
-  Phase 3.
+  partial-sky (masked) analysis are characterized in `docs/accuracy.md` and
+  `docs/masked.md`; differentiability and GPU are covered below / in `docs/gpu.md`.
 
-## GPU performance (measured 2026-06-10)
+## GPU performance
 
-Method and full numbers in `docs/gpu.md`. Headline (Cannon A100 MIG / V100, fp64):
+Method and full numbers in `docs/gpu.md`. Headline (A100 MIG / V100, fp64):
 
 - **Forward synthesis** GPU-accelerates **14–60×** the (8-core) CPU; fp64/fp32 ≈
-  2.2×; fp64 GPU==CPU parity 1e-14 … 1e-13 across the BK regime **incl. nside=2048**.
+  2.2×; fp64 GPU==CPU parity 1e-14 … 1e-13 across the supported regime **incl. nside=2048**.
 - **Adjoint / `map2alm`** were initially ~21× too slow on GPU: the dense→triangular
   alm packing used a **scatter** (`at[idx].set`), which is **~38000× slower than a
   gather in fp64 on GPU**. Fixed by packing via a gather (`dense_to_tri`, the mirror

@@ -3,9 +3,9 @@
 `jht.synthesis_general` / `jht.adjoint_synthesis_general` evaluate a band-limited
 field at **arbitrary points** (θ_j, φ_j) on the sphere — detector pointings, not
 the HEALPix grid. This is the JAX-native, differentiable replacement for ducc0's
-`sht.experimental.synthesis_general` / `adjoint_synthesis_general` (the sim-forward
-TOD path), and the *last* ducc0 capability the BICEP/Keck pipeline depends on:
-on-grid SHT (done) + this NUFFT = total ducc0 removal.
+`sht.experimental.synthesis_general` / `adjoint_synthesis_general` (the
+synthesis-at-arbitrary-pointings path): on-grid SHT + this NUFFT together cover
+ducc0's full on-/off-grid transform surface.
 
 ## Interface
 
@@ -26,7 +26,7 @@ alm   = jht.adjoint_synthesis_general(field, loc, *, spin, lmax, epsilon=1e-10)
 
 Matches ducc's convention (verified bit-for-bit on the physical modes), so it is a
 drop-in: same alm packing, same `loc` layout, **no `psi`** argument (the spin
-orientation rotation stays on the caller's side, as in ducc/bk-jax).
+orientation rotation stays on the caller's side, as in ducc).
 
 ## Algorithm — Double-Fourier-Sphere + 2D type-2 NUFFT
 

@@ -40,7 +40,7 @@ difference from the known input a_lm.
 
 Takeaways: ring weights drop the **bare** floor ~10× (~1e-3 → ~1e-4 tier) and
 let the Jacobi iteration reach machine precision (the unweighted iteration stalls
-~1e-7); **spin-2 ≡ spin-0** at every tier (no s2fft-style m<ℓ defect); jht's
+~1e-7); **spin-2 ≡ spin-0** at every tier (no spin-2 m<ℓ structural defect); jht's
 weighted result matches/beats healpy's ring-weighted `map2alm`.
 
 ## Ring weights — jht's own, pure-numpy, no files (`jht.weights`)
@@ -87,7 +87,7 @@ end-to-end performance is what matches).
 `S^T W S a = S^T W m`: `a_{k+1} = a_k + A0 (m − S a_k)`. It converges because the
 HEALPix points are quasi-uniform; ring weights precondition it. `niter=3` is the
 default and reaches the floor above; `niter=0` is the bare weighted estimator.
-The exact (unweighted) transpose `adjoint_synthesis = S^T` (the bk-jax seam / the
+The exact (unweighted) transpose `adjoint_synthesis = S^T` (the operator seam / the
 VJP) is **not** weighted and is unchanged by this work.
 
 ## Notes / open

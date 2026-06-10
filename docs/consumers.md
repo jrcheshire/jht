@@ -3,12 +3,12 @@
 jht is **standalone and consumer-agnostic** — it has no knowledge of any
 particular caller and contains no consumer-specific code. This note documents the
 stable seam a downstream project depends on, written so jht never needs to import
-or reference the consumer. The motivating consumer is `bk-jax` adopting jht *in
-place of ducc0* for its GPU/differentiable tier, but nothing below is BK-specific.
+or reference the consumer. It is written for a project adopting jht *in place of
+ducc0* for its GPU / differentiable tier, but nothing below is consumer-specific.
 
 > **Backend wiring lives in the consumer.** Any environment-variable / registry
-> dispatch (e.g. a `BK_JAX_SHT_BACKEND=jht` switch) is implemented on the
-> consumer side. jht just exposes the functions.
+> dispatch (e.g. an `SHT_BACKEND=jht` switch) is implemented on the consumer
+> side. jht just exposes the functions.
 
 ## What jht guarantees
 
@@ -32,7 +32,7 @@ place of ducc0* for its GPU/differentiable tier, but nothing below is BK-specifi
 | **off-grid** `aₗₘ → field` at arbitrary points | `jht.synthesis_general(alm, loc, *, spin, lmax, epsilon=1e-10)` | the **ducc0 `synthesis_general` replacement**; spin ∈ {0,1,2,3}; `loc (npts,2) = (θ,φ)`; alm- **and** pointing-differentiable |
 | off-grid exact transpose | `jht.adjoint_synthesis_general(field, loc, *, spin, lmax, epsilon)` | the `adjoint_synthesis_general` replacement |
 | masked analysis | `jht.pseudo_alm`, `jht.deconvolve` | zero-fill pseudo-aₗₘ; cut-sky CG deconvolution |
-| Wiener / MUSE inner solve | `jht.wiener`, `jht.constrained_realization` | `(SᵀN⁻¹S + C⁻¹)⁻¹SᵀN⁻¹m` (per-pixel `N⁻¹` + Cℓ prior); posterior draws |
+| Wiener / field-level-inference inner solve | `jht.wiener`, `jht.constrained_realization` | `(SᵀN⁻¹S + C⁻¹)⁻¹SᵀN⁻¹m` (per-pixel `N⁻¹` + Cℓ prior); posterior draws |
 
 `adjoint_synthesis` is the strict transpose of `synthesis` in the
 `(2 − δ_{m0})`-weighted aₗₘ inner product — this is the operator to drop into a
@@ -56,8 +56,8 @@ The complex transforms also differentiate under native JAX AD directly.
 `jht.synthesis_general` is differentiable **in the pointing `loc`** as well as in
 `alm` — ducc0's FFI raises `NotImplementedError` on `loc` tangents, so a consumer
 that wants ∂(TOD)/∂(pointing) currently has to build analytic position-derivative
-templates by hand (bk-jax synthesizes spin-1/3 ð/ð̄ fields for exactly this).
-With jht the loc-gradient is exact under native AD (`jax.grad`/`jvp`/`jacrev`,
+templates by hand (the usual workaround synthesizes spin-1/3 ð/ð̄ fields for
+exactly this). With jht the loc-gradient is exact under native AD (`jax.grad`/`jvp`/`jacrev`,
 `jacfwd ≡ jacrev`), so that hand-rolled machinery can be replaced by
 differentiating straight through `synthesis_general`. Interface matches ducc
 (`alm (ncomp,K)`, `loc (npts,2)=(θ,φ)`, no `psi` — orientation rotation stays on
@@ -66,7 +66,7 @@ matches ducc on the physical modes (see [`offgrid.md`](offgrid.md) /
 [`DISCREPANCIES.md`](../DISCREPANCIES.md)). Accuracy is the NUFFT `epsilon` tier
 (default 1e-10, matching ducc) — distinct from the on-grid tiers below.
 
-## The convention bridge (the bk-jax `2·conj` gotcha, resolved)
+## The convention bridge (the `2·conj` gotcha)
 
 JAX's native reverse-mode returns the cotangent in the JAX convention, which
 relates to the strict math adjoint by the `(2 − δ_{m0})` metric `G`:
@@ -88,7 +88,7 @@ jht serves the **GPU / differentiable tier** where the HEALPix ~1e-3 sampling
 floor is acceptable; weights + iteration reach ~1e-13 on band-limited inputs. It
 is **not** a replacement for ducc on a purity-critical (~1e-4 E→B-leakage)
 production path. A consumer should route only the GPU/diff workloads through jht
-and keep ducc where person-decades of tuning live. See [`accuracy.md`](accuracy.md)
+and keep ducc on the accuracy-critical path. See [`accuracy.md`](accuracy.md)
 and [`DISCREPANCIES.md`](../DISCREPANCIES.md) (e.g. spin-2 E/B ambiguous modes
 under a cut).
 
