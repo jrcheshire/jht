@@ -85,8 +85,11 @@ mypy = "*"
 pytest-xdist = ">=3.8.0,<4"
 
 [tool.pixi.tasks]
-test = "pytest"                       # full suite (local default + nightly + pre-release)
-test-fast = "pytest -m 'not slow'"    # the per-push CI gate (skips the heavy oracle sweeps)
+# `-n auto` (pytest-xdist) parallelizes across cores; `OMP_NUM_THREADS=1` pins one thread
+# per worker -- JAX-CPU otherwise grabs every core per process and oversubscribes. Measured
+# ~5x on the fast subset locally (~180s -> ~37s). env is per-task (does not leak).
+test = { cmd = "pytest -n auto", env = { OMP_NUM_THREADS = "1" } }                      # full suite
+test-fast = { cmd = "pytest -m 'not slow' -n auto", env = { OMP_NUM_THREADS = "1" } }   # fast subset (no slow sweeps)
 lint = "ruff check"
 format = "ruff format"
 typecheck = "mypy src/jht"
