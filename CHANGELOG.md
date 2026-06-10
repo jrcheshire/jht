@@ -6,9 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-06-07
+### Changed
+- **Faster CI** — the heavy off-grid oracle suite is marked `slow` and excluded from
+  the per-push gate (`pixi run test-fast`); the full suite runs in a nightly workflow
+  (and `pixi run test`). ~40% faster per-push CI, no coverage lost.
+- Pixi manifest table `[tool.pixi.project]` → `[tool.pixi.workspace]` (the deprecated
+  form).
 
-Inaugural release.
+## [0.1.0] - 2026-06-10
+
+Inaugural release. Published on PyPI as **`jaxht`** (`pip install jaxht` → `import jht`;
+the name `jht` is unavailable on PyPI). GitHub repo and import package stay `jht`.
 
 ### Added
 - **On-grid transforms** — spin-0 and spin-2 `synthesis` (a_lm → map) and the
@@ -26,9 +34,12 @@ Inaugural release.
 - **Differentiable real-DOF interface** — `synthesis_real`, `analysis_real`,
   `bandpower`, with the `alm_to_real` / `real_to_alm` isometry and the
   `alm_metric_weight` (2 − δ_m0) bridge.
-- **GPU (CUDA)** — pure JAX, runs on GPU with no code change; a parity harness
-  (`scripts/gpu_check.py`) and a single-slot performance diagnostic
-  (`scripts/gpu_diagnostic.py`).
+- **GPU (CUDA)** — pure JAX, runs on GPU with no code change. Measured on Cannon
+  A100/V100 (fp64): GPU==CPU parity ~1e-13 across the BK regime **including
+  nside=2048**; forward synthesis 14–60× CPU. Three fp64-scatter→gather reworks (the
+  `dense_to_tri` adjoint packing, the `nufft2d2` off-grid grid build, and the on-grid
+  ring assembly) make the adjoint and off-grid forward fast and let nside=2048 compile.
+  Parity + diagnostic harnesses `scripts/gpu_check.py`, `scripts/gpu_diagnostic.py`.
 
 [Unreleased]: https://github.com/jrcheshire/jht/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jrcheshire/jht/releases/tag/v0.1.0

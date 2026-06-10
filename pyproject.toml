@@ -64,7 +64,7 @@ path = "src/jht/__init__.py"
 packages = ["src/jht"]
 
 # --- Pixi (standard env tool) -------------------------------------------------
-[tool.pixi.project]
+[tool.pixi.workspace]
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
