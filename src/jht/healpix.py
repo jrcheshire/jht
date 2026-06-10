@@ -196,6 +196,22 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     phase = jnp.asarray(np.exp(1j * m_pos[:, None] * geo.phi0[None, :]))  # (M, nrings)
     conj_phase = jnp.conj(phase)
 
+    # Combined-gather assembly indices.  The per-group output writes are hoisted out of the
+    # ring loop into one static-permutation GATHER: the ~nside-way fp64/complex *scatter*
+    # unroll is what tips the full synth over the ptxas / compile-RAM limit at nside=2048
+    # (the per-length FFTs stay -- a HEALPix ring of length N needs an exact length-N FFT,
+    # so they cannot be batched to a common length).  ``buf`` is each group's ring values
+    # concatenated in group order; ``pix_to_buf`` / ``ring_to_col`` are the inverse perms
+    # back to map-pixel / ring-column order.
+    buf_pix = np.concatenate([g.pix_idx.ravel() for g in groups])  # (npix,) permutation
+    pix_to_buf_np = np.empty(npix, dtype=np.int64)
+    pix_to_buf_np[buf_pix] = np.arange(npix)
+    pix_to_buf = jnp.asarray(pix_to_buf_np)
+    ring_order = np.concatenate([g.ring_idx for g in groups])  # (nrings,) permutation
+    ring_to_col_np = np.empty(geo.nrings, dtype=np.int64)
+    ring_to_col_np[ring_order] = np.arange(geo.nrings)
+    ring_to_col = jnp.asarray(ring_to_col_np)
+
     # --- North/South symmetry geometry (recursion runs on the north half + equator) ---
     # rings 0..2*nside-1 are north cap + equator; ring (4*nside-2-r) is the south
     # reflection of north ring r (r = 0..2*nside-2); the equator (r=2*nside-1) is self.
@@ -228,24 +244,23 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         def synth(alm):
             Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm))
             G = build_full(Ftot, Fsig) * phase  # (M, nrings)
-            out = jnp.zeros(npix, dtype=jnp.float64)
+            cols = []
             for g in groups:
                 Cp = G[:, g.ring_idx]  # (M, n_g)
                 D = jnp.zeros((g.ring_idx.size, g.N), dtype=jnp.complex128)
                 D = D.at[:, g.k_plus].add(Cp.T)
                 D = D.at[:, g.k_minus].add(jnp.conj(Cp[1:].T))
-                vals = jnp.real(jnp.fft.ifft(D, axis=1) * g.N)  # (n_g, N)
-                out = out.at[g.pix_idx.ravel()].set(vals.ravel(), unique_indices=True)
-            return out
+                cols.append(jnp.real(jnp.fft.ifft(D, axis=1) * g.N).ravel())  # (n_g*N,)
+            return jnp.concatenate(cols)[pix_to_buf]  # one gather, not ~nside scatters
 
         @jax.jit
         def adj(m):
-            V = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
+            cols = []
             for g in groups:
                 fr = jnp.fft.fft(m[g.pix_idx], axis=1)  # (n_g, N)
                 ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
-                Vg = fr[:, g.g_plus] * ph  # (n_g, M)
-                V = V.at[:, g.ring_idx].set(Vg.T, unique_indices=True)
+                cols.append((fr[:, g.g_plus] * ph).T)  # (M, n_g)
+            V = jnp.concatenate(cols, axis=1)[:, ring_to_col]  # (M, nrings), one gather
             Vn, Vs = fold_south(V)
             return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs))
 
@@ -263,30 +278,28 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         )
         Fp = build_full(FpN, FpS) * phase
         Fm = build_full(FmN, FmS) * phase
-        Q = jnp.zeros(npix, dtype=jnp.float64)
-        U = jnp.zeros(npix, dtype=jnp.float64)
+        cols = []
         for g in groups:
             Cp = Fp[:, g.ring_idx]
             Cm = Fm[:, g.ring_idx]
             D = jnp.zeros((g.ring_idx.size, g.N), dtype=jnp.complex128)
             D = D.at[:, g.k_plus].add(Cp.T)
             D = D.at[:, g.k_minus].add(jnp.conj(Cm[1:].T))
-            qu = jnp.fft.ifft(D, axis=1) * g.N  # (n_g, N)
-            Q = Q.at[g.pix_idx.ravel()].set(jnp.real(qu).ravel(), unique_indices=True)
-            U = U.at[g.pix_idx.ravel()].set(jnp.imag(qu).ravel(), unique_indices=True)
-        return jnp.stack([Q, U])
+            cols.append((jnp.fft.ifft(D, axis=1) * g.N).ravel())  # complex (n_g*N,)
+        qu = jnp.concatenate(cols)[pix_to_buf]  # (npix,) complex, one gather
+        return jnp.stack([jnp.real(qu), jnp.imag(qu)])
 
     @jax.jit
     def adj2(maps2d):  # (2, npix) -> (2, K)
-        Vp = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
-        Vm = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
+        colsp = []
+        colsm = []
         for g in groups:
             W = jnp.fft.fft(maps2d[0][g.pix_idx] + 1j * maps2d[1][g.pix_idx], axis=1)  # (n_g, N)
             ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
-            Fpb = W[:, g.g_plus] * ph
-            Fmb = jnp.conj(W[:, g.g_minus]) * ph
-            Vp = Vp.at[:, g.ring_idx].set(Fpb.T, unique_indices=True)
-            Vm = Vm.at[:, g.ring_idx].set(Fmb.T, unique_indices=True)
+            colsp.append((W[:, g.g_plus] * ph).T)  # (M, n_g)
+            colsm.append((jnp.conj(W[:, g.g_minus]) * ph).T)  # (M, n_g)
+        Vp = jnp.concatenate(colsp, axis=1)[:, ring_to_col]  # (M, nrings), one gather
+        Vm = jnp.concatenate(colsm, axis=1)[:, ring_to_col]
         Vpn, Sp = fold_south(Vp)
         Vmn, Sm = fold_south(Vm)
         p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm)
