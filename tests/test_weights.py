@@ -23,11 +23,17 @@ QUAD_TOL = 1e-9  # a-priori: exactness of the m=0 quadrature, relative to 4*pi
 
 
 def _quadrature_moments(nside: int) -> np.ndarray:
-    """``Q_l = sum_pixels W_pix P_l(z_pix)`` for l = 0..2*nside (per-pixel weights)."""
+    """``Q_l = sum_pixels W_pix P_l(z_pix)`` for l = 0..2*nside (per-pixel weights).
+
+    Collapsed to per-ring: every pixel in a ring shares the same ``z``, so the
+    per-pixel sum factors exactly as ``sum_ring (sum_{pix in ring} W_pix)
+    P_l(z_ring)``.  Identical moments, but the Vandermonde is ``(nrings,
+    2*nside+1)`` rather than ``(npix, 2*nside+1)`` -- ~16 MB vs 24 GiB at
+    nside=512, where the per-pixel form OOMs CI runners.
+    """
     geo = RingInfo(nside)
-    wv = pixel_weights(nside)
-    z_pix = np.repeat(geo.z, geo.npix_ring)
-    return wv @ legvander(z_pix, 2 * nside)
+    ring_w = np.add.reduceat(pixel_weights(nside), geo.startpix)  # exact per-ring weight sum
+    return ring_w @ legvander(geo.z, 2 * nside)
 
 
 def test_ring_weights_shape_and_bounded():
