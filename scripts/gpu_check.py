@@ -135,8 +135,14 @@ def bench(nside, lmax, spin, rng, batch=8) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--min", type=int, default=64, help="smallest nside to run")
     ap.add_argument("--max", type=int, default=1024, help="largest nside to run")
     ap.add_argument("--batch", type=int, default=8, help="vmap batch size")
+    ap.add_argument(
+        "--parity-only",
+        action="store_true",
+        help="run only the GPU-vs-CPU parity table; skip timing/vmap (vmap OOMs at nside=2048)",
+    )
     args = ap.parse_args()
 
     devs = jax.devices()
@@ -146,7 +152,7 @@ def main():
     print(f"devices: {devs}")
     print(f"default backend: {jax.default_backend()}  |  GPU present: {gpu is not None}\n")
 
-    ladder = [(ns, lm) for ns, lm in LADDER if ns <= args.max]
+    ladder = [(ns, lm) for ns, lm in LADDER if args.min <= ns <= args.max]
     rng = np.random.default_rng(0)
 
     if gpu is not None:
@@ -161,6 +167,11 @@ def main():
         print()
     else:
         print("== parity skipped (no GPU visible) -- run on the NVIDIA box ==\n")
+
+    if args.parity_only:
+        print("== timing skipped (--parity-only) ==")
+        print(f"\nhost peak RSS: {peak_rss_mb():.0f} MB")
+        return
 
     print(f"== timing on default device ({jax.default_backend()}) ==")
     hdr = (f"{'nside':>5} {'lmax':>5} {'spin':>4} {'compile_s':>9} {'synth_ms':>9} "
