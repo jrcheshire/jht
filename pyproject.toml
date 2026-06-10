@@ -1,5 +1,7 @@
 [project]
-name = "jht"
+# Distribution (PyPI) name is `jaxht` -- the import name stays `jht` (PyPI blocks `jht`
+# as too-short/too-similar). Like `pip install beautifulsoup4` -> `import bs4`.
+name = "jaxht"
 description = "JAX-native spherical harmonic transforms (BK-regime first): GPU-capable, differentiable, dependency-controlled."
 authors = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
 maintainers = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
@@ -67,7 +69,7 @@ channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
-jht = { path = ".", editable = true }
+jaxht = { path = ".", editable = true }   # the editable self-install (== [project].name)
 
 [tool.pixi.dependencies]
 python = ">=3.11"

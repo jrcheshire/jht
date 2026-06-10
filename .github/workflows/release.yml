@@ -6,7 +6,7 @@ name: release
 # ONE-TIME PyPI SETUP before the first tag (the project need not exist yet -- use a
 # "pending publisher"): on https://pypi.org -> your account -> Publishing, add a
 # trusted publisher with:
-#     PyPI project name: jht
+#     PyPI project name: jaxht        (distribution name; the import name stays `jht`)
 #     Owner:             jrcheshire
 #     Repository name:   jht
 #     Workflow name:     release.yml
@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/jht/
+      url: https://pypi.org/project/jaxht/
     permissions:
       id-token: write # OIDC for Trusted Publishing -- no token needed
     steps:

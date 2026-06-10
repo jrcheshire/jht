@@ -3807,7 +3807,7 @@ packages:
   size: 433413
   timestamp: 1764777166076
 - pypi: .
-  name: jht
+  name: jaxht
   requires_dist:
   - jax>=0.4.30
   - numpy>=1.24
