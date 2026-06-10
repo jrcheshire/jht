@@ -2,7 +2,7 @@
 # Distribution (PyPI) name is `jaxht` -- the import name stays `jht` (PyPI blocks `jht`
 # as too-short/too-similar). Like `pip install beautifulsoup4` -> `import bs4`.
 name = "jaxht"
-description = "JAX-native spherical harmonic transforms (BK-regime first): GPU-capable, differentiable, dependency-controlled."
+description = "JAX-native spherical harmonic transforms (spin-0/2 on-grid + off-grid NUFFT): GPU-capable, differentiable, and minimal-dependency (pure JAX + numpy)."
 authors = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
 maintainers = [{ name = "James Cheshire", email = "cheshire@caltech.edu" }]
 requires-python = ">=3.11"
