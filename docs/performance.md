@@ -93,21 +93,23 @@ Per transform, the dominant live arrays are:
 There is **no dense `O(L·M·n_θ)` λ table** — that is the deliberate on-the-fly
 choice (a dense table would be ≈16 GB *per spin component* at the ceiling).
 
-The **measured** isolated footprint at nside=2048 is nonetheless ~11–13 GB —
-well above the sum of the live arrays above. The excess is the FFT-assembly
-stage, not the recursion: the polar cap is processed as ~`nside` length-groups,
-each unrolled in the jit graph with a scatter into the full `O(npix)` map, and
-XLA does not always fuse these in place. This is the next **memory** lever (a
-pad-and-fold to a common ring length, or a single combined scatter, would cut
-it); runtime is unaffected (FFTs are ≲10 %).
+The FFT-assembly stage (not the recursion) processes the polar cap as ~`nside`
+length-groups — a length-N HEALPix ring needs an exact length-N FFT, so the
+per-ring FFTs cannot be padded to a common length. The per-group **output writes**
+were a ~`nside`-way unrolled fp64 scatter into the `O(npix)` map; they are now
+hoisted out of the ring loop into a **single combined gather** (`pix_to_buf` /
+`ring_to_col` static permutations in `src/jht/healpix.py`). That de-unroll is what
+makes nside=2048 compile on GPU (see below) — bit-identical, runtime unaffected
+(FFTs are ≲10 %).
 
 ## Notes / future levers (deferred)
 
 - **Compile time grows with the cap-FFT length-groups** (~nside distinct lengths
-  unrolled in one jit). One-time (jit caches by shape) and modest on CPU, but on
-  **GPU it bites**: minutes at nside=1024 and `ptxas` fails outright at nside=2048,
-  so the de-unroll (pad-and-fold / single combined scatter→gather) is a real GPU
-  item — see `docs/gpu.md`.
+  unrolled in one jit). One-time (jit caches by shape) and modest on CPU; on GPU
+  the *one-time* compile is multi-minute at nside ≥ 1024. The combined-gather
+  de-unroll (above) removed the per-group scatter that pushed the full module past
+  `ptxas` at nside=2048, so it now compiles; the remaining multi-minute compile is
+  the per-length-FFT unroll itself (a future lever, not a blocker) — see `docs/gpu.md`.
 - **`map2alm` recomputes the recursion** each of its 7 passes (the memory-safe
   on-the-fly choice). A memory-gated cached-λ fast path for small nside is an
   easy future optimization.
@@ -116,19 +118,28 @@ it); runtime is unaffected (FFTs are ≲10 %).
   `docs/accuracy.md`, `docs/masked.md`); differentiability is Phase 2; GPU is
   Phase 3.
 
-## GPU performance (measured 2026-06-08)
+## GPU performance (measured 2026-06-10)
 
 Method and full numbers in `docs/gpu.md`. Headline (Cannon A100 MIG / V100, fp64):
 
 - **Forward synthesis** GPU-accelerates **14–60×** the (8-core) CPU; fp64/fp32 ≈
-  2.2×; fp64 GPU==CPU parity 1e-14 … 1e-13.
+  2.2×; fp64 GPU==CPU parity 1e-14 … 1e-13 across the BK regime **incl. nside=2048**.
 - **Adjoint / `map2alm`** were initially ~21× too slow on GPU: the dense→triangular
   alm packing used a **scatter** (`at[idx].set`), which is **~38000× slower than a
   gather in fp64 on GPU**. Fixed by packing via a gather (`dense_to_tri`, the mirror
   of the forward `tri_to_dense`) — adjoint **4041 → 187 ms** at nside=512, `map2alm`
   ~16 s → ~1.3 s. Numerically identical (the gather index is the scatter's inverse).
-- **Off-grid** is correct and memory-light on GPU (lmax=1000, N=1e6 ~1.1 GB); the
-  pointing gradient costs ~1× a forward.
-- **Open GPU items:** off-grid *forward* synthesis ~35 s at lmax=1000 (the general
-  `synth_contract`, un-tuned for GPU); nside=2048 does not compile (the unrolled
-  cap-FFT assembly exceeds `ptxas` — needs de-unrolling). See `docs/gpu.md`.
+- **Off-grid forward** was ~35 s at lmax=1000 (N-independent): the `nufft2d2` grid
+  build was an fp64/complex `C.at[].set` **scatter** = 97 % of it. Replaced by an
+  inverse-index **gather** → ~1.4 ms, so the forward is recursion-bound (~0.5–0.9 s,
+  ~40×). Off-grid is otherwise correct and memory-light (N=1e6 ~1.1 GB); the pointing
+  gradient costs ~1× a forward.
+- **nside=2048 now compiles + runs on GPU.** The ~`nside`-way unrolled fp64 map
+  scatter (fused with the recursion) exceeded `ptxas` (exit 9); the **combined-gather**
+  de-unroll (above) shrinks the module enough to compile. At nside=2048, lmax=1000 on
+  a 20 GB A100 MIG, synth + `map2alm` match CPU to ~1e-13 and the runtime fits the
+  slice (one-time compile is multi-minute, jit-cached).
+
+Every fix here is the same lesson — **fp64/complex `at[idx].set` scatters are
+catastrophic on GPU; use a gather** — and each is bit-identical (gated by the full
+CPU suite + GPU==CPU parity).

@@ -6,12 +6,13 @@ contraction + ring FFTs run on whatever device JAX defaults to. This note pins
 the install story, the one footgun (x64), the accuracy tier, and how to validate
 on hardware.
 
-**Status (2026-06-08):** measured on Cannon `gpu_requeue` A100 (MIG) slices and a
-V100 — see "Measured GPU performance" below. fp64 GPU==CPU parity holds; forward
-synthesis and (after the `dense_to_tri` gather fix) the adjoint / `map2alm` and the
-off-grid path all run well at nside ≤ 1024. Two GPU items remain: off-grid *forward*
-speed and the nside=2048 compile ceiling. Development is on osx-arm64, which has no
-fp64 GPU (see "Mac-local tier" below).
+**Status (2026-06-10):** measured on Cannon A100 (MIG) slices and a V100 — see
+"Measured GPU performance" below. fp64 GPU==CPU parity holds across the BK regime
+**including nside=2048** (synth and `map2alm` relerr ~1e-13). All of forward/adjoint
+synthesis, `map2alm`, and the off-grid path run on GPU; the two items that were open
+at 2026-06-08 — the slow off-grid *forward* and the nside=2048 compile failure — are
+both **fixed** (two scatter→gather reworks; see "Measured GPU performance"). Development
+is on osx-arm64, which has no fp64 GPU (see "Mac-local tier" below).
 
 ## The `gpu` pixi environment
 
@@ -181,18 +182,29 @@ Measured on Cannon `gpu_requeue` A100 MIG slices (10–25 GB) and a V100-16GB, f
 - **Batched (`vmap`) synthesis:** per-realization time falls with batch (the
   forecast-sweep knee), e.g. ~286 → ~168 ms/realization at nside=512 (batch 1→4).
 
-### Two GPU items still open
+### Two GPU items — both fixed (2026-06-10)
 
-- **Off-grid *forward* synthesis is slow** — ~35 s at lmax=1000, *independent of N*
-  (so recursion/DFS-bound, the general `synth_contract`, not the NUFFT) and ~50× the
-  equivalent on-grid synthesis. Un-tuned for GPU; separate from the adjoint fix.
-- **nside=2048 does not compile on GPU** — `ptxas` exits non-zero (code 9): the
-  ~nside-way *unrolled* per-ring-group cap-FFT assembly is too large a kernel for the
-  PTX assembler (and already compiles for minutes at nside=1024). This is a
-  **compile** ceiling, not memory (measured footprints are small, ~1–2 GB at
-  nside=1024). The fix is to **de-unroll** that assembly (batch/bucket the ring FFTs
-  + a single combined gather/scatter). Above the typical MUSE nside (≤1024), so
-  deferred.
+The same lesson as the adjoint fix above (fp64/complex scatters are catastrophic on
+GPU) closed both items that were open at 2026-06-08. Both reworks are **bit-identical**
+(gather of the same values, gated by the full CPU suite + GPU==CPU parity).
+
+- **Off-grid *forward* synthesis — fixed (~40×).** A stage profiler
+  (`scripts/profile_offgrid_forward.py`) pinned the N-independent ~35 s to the
+  `nufft2d2` oversampled-grid build, a fp64/complex `C.at[kbins,mbins].set(c)` **scatter**
+  = 97% of the forward (34.5 s of 35 s at lmax=1000). Replaced by a precomputed
+  inverse-index **gather** (`NufftPlan.fill_src/fill_mask`): the grid build drops 34.5 s
+  → ~1.4 ms, so the forward is now recursion-bound (~0.5–0.9 s). (The two
+  `synth_contract` channels are deduplicated for spin-0.)
+- **nside=2048 now compiles and matches CPU.** The per-ring-group output writes
+  (`out.at[pix].set` / `V.at[:,ring].set`) were a **~nside-way unrolled fp64 scatter**;
+  fused with the recursion, the full `jit_synth` module exceeded `ptxas` (exit 9) at
+  nside=2048. Hoisting those writes out of the ring loop into a **single combined gather**
+  (`pix_to_buf` / `ring_to_col` static permutations; the per-length ring FFTs stay — a
+  length-N HEALPix ring needs an exact length-N FFT, so they can't be padded to a common
+  length) shrinks the module enough to compile. Measured at nside=2048, lmax=1000 on a
+  20 GB A100 MIG: synth and `map2alm` **compile, run, and match CPU to ~1e-13** (synth
+  4.4e-13 / 1.4e-14 spin-0; 3.1e-13 / 2.0e-14 spin-2). Runtime fits in a ~20 GB slice;
+  the one-time compile is multi-minute (jit-cached).
 
 ## Open / to settle on Cannon
 
@@ -200,5 +212,7 @@ Measured on Cannon `gpu_requeue` A100 MIG slices (10–25 GB) and a V100-16GB, f
   runtime; the driver only needs to be forward-compatible). Confirmed working on the
   A100/V100 `gpu_requeue` nodes via `pixi run --frozen -e gpu`.
 - ~~fp64 throttle factor~~ → measured ≈ 2.2× (A100/V100; good fp64 parts).
-- ~~Whether the memory ceiling forces a rewrite~~ → the nside=2048 blocker is the
-  `ptxas` **compile** ceiling (de-unroll), not memory; see above.
+- ~~Whether the memory ceiling forces a rewrite~~ → the nside=2048 blocker was the
+  `ptxas` **compile** ceiling, now **fixed** by the combined-gather de-unroll (see
+  "Measured GPU performance"); a 20 GB MIG (`--gres=gpu:nvidia_a100_3g.20gb:1` on
+  `gpu_test`) holds nside=2048 synth + `map2alm`.
