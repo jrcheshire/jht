@@ -30,7 +30,13 @@ See ``README.md`` for the tour, ``docs/consumers.md`` for the downstream seam
 from __future__ import annotations
 
 from .analysis import bare_analysis, map2alm
-from .diff import analysis_real, bandpower, synthesis_real
+from .diff import (
+    adjoint_synthesis_general_real,
+    analysis_real,
+    bandpower,
+    synthesis_general_real,
+    synthesis_real,
+)
 from .healpix import (
     adjoint_synthesis,
     alm_metric_weight,
@@ -75,6 +81,8 @@ __all__ = [
     # differentiable (real-DOF) interface
     "synthesis_real",  # S o T^-1 : R^n -> map
     "analysis_real",  # T o map2alm : map -> R^n
+    "synthesis_general_real",  # S_g o T^-1 : R^n -> field at arbitrary points
+    "adjoint_synthesis_general_real",  # T o S_g^T : field -> R^n (exact transpose)
     "bandpower",  # angular auto-power C_ell
     # real-DOF isometry T
     "alm_to_real",

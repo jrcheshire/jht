@@ -6,11 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Off-grid real-DOF layer** — `synthesis_general_real` (`S_g ∘ T⁻¹`) and
+  `adjoint_synthesis_general_real` (`T ∘ S_gᵀ`): the arbitrary-pointing duals of
+  `synthesis_real`, a plain real-linear `ℝⁿ→ℝᵐ` over spin 0–3 (`jacfwd ≡ jacrev`,
+  native VJP == the exact transpose, no `2·conj` bridge). The ergonomic
+  gradient-based entry point to the NUFFT path.
+
 ### Changed
-- **CI** — `slow` marker splits the heavy off-grid oracle suite out of the fast
-  subset (`pixi run test-fast`); the full suite runs via `pixi run test`. CI workflows
-  (`test.yml`, `full-suite.yml`) are **manual-only** (`workflow_dispatch`) so they
-  never auto-burn runner minutes.
+- **CI** — a `slow` marker splits the heavy off-grid oracle suite out of the fast
+  subset; `test.yml` runs that fast subset (`pixi run test-fast`, ~5 min) on pushes
+  to `main` and on PRs, while the full suite (`full-suite.yml`, `pixi run test`)
+  stays **manual-only** (`workflow_dispatch`).
 - Pixi manifest table `[tool.pixi.project]` → `[tool.pixi.workspace]` (the deprecated
   form).
 

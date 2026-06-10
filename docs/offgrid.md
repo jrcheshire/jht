@@ -87,6 +87,12 @@ Both gradients are exact under JAX's **native autodiff** (no custom rule):
 - **alm gradient** — `synthesis_general` is alm-linear; `jax.vjp(synthesis_general)(v)
   == G·conj(adjoint_synthesis_general(v))` with `G = jht.alm_metric_weight(lmax)`
   (the same `(2−δ_{m0})` bridge as on-grid).
+- **real-DOF layer** — `synthesis_general_real` (`S_g ∘ T⁻¹`) and its exact transpose
+  `adjoint_synthesis_general_real` (`T ∘ S_gᵀ`) compose the above with the real
+  isometry `T` of `jht.masked` (the off-grid duals of `synthesis_real`): a plain
+  real-linear `ℝⁿ→ℝᵐ`, so `jax.vjp` returns the **exact** transpose with no `2·conj`
+  bridge and `jacfwd ≡ jacrev` holds exactly. The recommended gradient-based entry
+  point to this path; spin 0–3.
 - **pointing gradient** — `∂field/∂loc` is exact to the field's true derivative
   (~1e-12 vs the analytic derivative). The ES-kernel window index is
   `stop_gradient`-frozen (it is genuinely locally constant), so AD flows through the

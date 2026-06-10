@@ -24,7 +24,8 @@ Validated by a gated suite (190 tests, float64) against **healpy** and **ducc0**
   (spin 0–3), differentiable in **both** the aₗₘ and the pointings.
 - **Differentiable** — native JAX autodiff throughout (`jacfwd ≡ jacrev`, tight
   adjoint identity), plus a convention-clean real-DOF layer (`synthesis_real` /
-  `analysis_real`) with no complex-conjugate subtlety.
+  `analysis_real` on-grid, `synthesis_general_real` off-grid) with no
+  complex-conjugate subtlety.
 - **GPU** — pure JAX, so every transform runs on CUDA with no code change;
   measured GPU==CPU parity ~1e-13 (fp64) through nside=2048.
 - **Partial-sky** — masked pseudo-aₗₘ, a cut-sky CG deconvolution, and a masked

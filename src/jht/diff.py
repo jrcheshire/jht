@@ -35,10 +35,13 @@ import numpy as np
 from .analysis import map2alm
 from .healpix import alm_metric_weight, synthesis
 from .masked import alm_to_real, n_dof, real_to_alm
+from .offgrid import adjoint_synthesis_general, synthesis_general
 
 __all__ = [
     "synthesis_real",
     "analysis_real",
+    "synthesis_general_real",
+    "adjoint_synthesis_general_real",
     "bandpower",
     "alm_to_real",
     "real_to_alm",
@@ -66,6 +69,41 @@ def analysis_real(
     The real-DOF dual of :func:`jht.analysis.map2alm`; AD-clean in both modes.
     """
     a = map2alm(maps, nside, lmax, spin=spin, niter=niter, use_weights=use_weights)
+    return alm_to_real(a, lmax, spin)
+
+
+# --------------------------------------------------------------------------- #
+# off-grid (NUFFT) real-DOF transforms -- the dual of synthesis_real for the
+# arbitrary-pointing path (spin 0-3, no on-grid inverse so the adjoint is exposed)
+# --------------------------------------------------------------------------- #
+def synthesis_general_real(
+    x, loc, *, spin: int = 0, lmax: int, epsilon: float = 1e-10
+) -> jax.Array:
+    """``S_g o T^-1``: real-DOF vector ``x`` -> field at arbitrary points ``loc``.
+
+    The off-grid (NUFFT) dual of :func:`synthesis_real`: composes the real-DOF
+    isometry ``T^-1`` (:func:`jht.masked.real_to_alm`) with
+    :func:`jht.offgrid.synthesis_general`, giving a plain real-linear map (no
+    complex-conjugate convention; ``jacfwd == jacrev``).  ``x`` has length
+    :func:`n_dof(lmax, spin) <jht.masked.n_dof>`; ``loc`` is ``(npts, 2)`` of
+    ``[theta, phi]``.  Returns ``(npts,)`` for ``spin=0`` or ``(2, npts)`` (Q, U)
+    for ``spin=1..3``, exactly as :func:`jht.offgrid.synthesis_general`.
+    """
+    return synthesis_general(real_to_alm(x, lmax, spin), loc, spin=spin, lmax=lmax, epsilon=epsilon)
+
+
+def adjoint_synthesis_general_real(
+    field, loc, *, spin: int = 0, lmax: int, epsilon: float = 1e-10
+) -> jax.Array:
+    """``T o S_g^T``: field at points ``loc`` -> real-DOF vector ``x``.
+
+    The exact transpose of :func:`synthesis_general_real` in the plain real inner
+    products (``<S_g_real x, v>_2 == <x, S_g_real^T v>_2``): ``T`` is an isometry in
+    the ``(2 - delta_m0)`` metric ``G``, so ``T o S_g^T`` is the Euclidean transpose
+    of ``S_g o T^-1``.  Equivalently the native reverse-mode cotangent of
+    :func:`synthesis_general_real` (real-linear, so VJP == transpose).
+    """
+    a = adjoint_synthesis_general(field, loc, spin=spin, lmax=lmax, epsilon=epsilon)
     return alm_to_real(a, lmax, spin)
 
 
