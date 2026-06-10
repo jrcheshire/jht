@@ -1,9 +1,13 @@
 name: test
 
-# MANUAL ONLY. Deliberately NOT triggered on push/PR: the suite is minutes-expensive
-# and frequent pushes to `main` would burn runner minutes. Run it on demand from the
-# Actions tab (or `gh workflow run test.yml`), or rely on local `pixi run test`.
+# Runs the FAST gated suite (`-m 'not slow'`, ~5 min) on pushes to `main` and on PRs.
+# The slow off-grid oracle sweeps and the full suite stay MANUAL (full-suite.yml) so a
+# rapid-iteration day can't silently drain runner minutes -- a per-push *full* suite
+# (30-40 min) once did. Keep heavy work off this trigger; run the full suite on demand.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
