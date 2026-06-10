@@ -14,6 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gradient-based entry point to the NUFFT path.
 
 ### Changed
+- **`map2alm` → `analysis`** — the map→aₗₘ inverse is now canonically `jht.analysis`,
+  the field-standard mirror of `synthesis` (and consistent with `bare_analysis` /
+  `analysis_real`). **`jht.map2alm` stays as a back-compat alias** (same object), so
+  nothing breaks. The internal module `jht/analysis.py` moved to `jht/_analysis.py`.
 - **CI** — a `slow` marker splits the heavy off-grid oracle suite out of the fast
   subset; `test.yml` runs that fast subset (`pixi run test-fast`, ~5 min) on pushes
   to `main` and on PRs, while the full suite (`full-suite.yml`, `pixi run test`)

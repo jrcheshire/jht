@@ -27,7 +27,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from jht.analysis import map2alm  # noqa: E402
+from jht import map2alm  # noqa: E402  (alias of jht.analysis -- back-compat coverage)
 from jht.diff import (  # noqa: E402
     analysis_real,
     bandpower,

@@ -18,9 +18,9 @@ whole point), and a noise-aware **Wiener filter** that adds a signal prior.
 ### 1. `pseudo_alm` — the masked pseudo-a_lm (zero-fill)
 
 Mask the **map**, keep the **full** quadrature weights, run the existing
-full-residual Jacobi (`jht.analysis.map2alm`):
+full-residual Jacobi (`jht.analysis`):
 
-> `pseudo_alm(m, M) = map2alm(M·m, …)`.
+> `pseudo_alm(m, M) = analysis(M·m, …)`.
 
 With uniform weights (`use_weights=False, niter=0`) this is exactly the canonical
 pseudo-a_lm `(4π/Npix) Sᵀ(M·m)` — the standard CMB estimator (the input to a
@@ -107,7 +107,7 @@ dependency) is exactly correct. `T` is gated as an isometry (`‖Tx‖² = ‖a�
 | M-isometry | `T⁻¹T=I`, `‖Tx‖²=‖a‖_w²` | 1e-12 | ~2e-16 |
 | M-operator | `A_x` == dense `Sᵀdiag(MW)S`; symmetric; PSD | 1e-10 | ~4e-15 |
 | M-pseudo | unweighted `pseudo_alm` == healpy/ducc (spin 0 & 2, binary + apod) | 1e-10 | ~3e-15 |
-| M-fsky→1 | `pseudo_alm(·,𝟙)` == full-sky `map2alm`; `deconvolve(·,𝟙)` == truth | 1e-12 / 1e-6 | ~1e-13 |
+| M-fsky→1 | `pseudo_alm(·,𝟙)` == full-sky `analysis`; `deconvolve(·,𝟙)` == truth | 1e-12 / 1e-6 | ~1e-13 |
 | M-deconv | `deconvolve` == truth == dense solve, mild cut (spin 0 & 2) | 1e-6 | ~1e-13 |
 | W-prior | `_prior_diag(Cℓ)` == independent `diag(1/Cℓ)` build | 1e-12 | 0 (exact) |
 | W-operator | `A_x + D` == dense `Sᵀdiag(N⁻¹)S + diag(1/Cℓ)`; symmetric; strictly PD | 1e-10 | ~5e-16 |

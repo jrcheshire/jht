@@ -8,7 +8,7 @@ the per-ring azimuthal FFT is already exact in ``m``, so what remains is the
 colatitude quadrature is exact for the (even) Legendre polynomials up to a target
 degree.  Applied to all ``m`` (the weight is azimuthally symmetric) this is a
 heuristic correction that drops the floor ~10x (~1e-3 -> ~1e-4) and -- more
-importantly -- makes the Jacobi iteration in :func:`jht.analysis.map2alm`
+importantly -- makes the Jacobi iteration in :func:`jht.analysis`
 converge several orders deeper (it conditions the normal equations).
 
 Convention (matches the HEALPix ``weight_ring`` files, verified empirically):

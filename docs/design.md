@@ -15,7 +15,7 @@ approximate. Three accuracy regimes matter:
 |---|---|---|---|
 | Bare floor | Direct quadrature, uniform `4π/Npix` | ~2–17e-3 | Not good enough alone |
 | + ring weights | jht's own min-norm ring weights (`jht.weights`) | bare ~2–12e-4 | Closes toward ducc |
-| + Jacobi iteration | `map2alm` iterative refinement, band-limited | **~1e-13** | ducc-class |
+| + Jacobi iteration | `analysis` iterative refinement, band-limited | **~1e-13** | ducc-class |
 
 - **Phase-0 target (met):** reach the *bare floor with no structural defect* —
   spin-2 sits at ~1e-3 like spin-0, NOT s2fft's 3–28%.
@@ -133,8 +133,8 @@ The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
   unique) to keep the kernels transpose-friendly; forward numerics are unchanged.
 - **Two distinct operators, kept separate.** `adjoint_synthesis = Sᵀ = Yᵀ` is the
   exact, weight-free **strict transpose** (the bk-jax seam / the operator a CG
-  solve needs); `map2alm` (`A = SᵀW`, weighted + iterative) is the *approximate
-  inverse*. Neither is the AD cotangent — keep all three distinct.
+  solve needs); `analysis` (`A = SᵀW`, weighted + iterative, aka `map2alm`) is the
+  *approximate inverse*. Neither is the AD cotangent — keep all three distinct.
 - **The convention (the `2·conj` subtlety that bit bk-jax), pinned.** The packed
   aₗₘ store only m≥0; a real field's m<0 half is implied, so the alm inner product
   carries the diagonal metric `G = 2 − δ_{m0}` (`jht.healpix.alm_metric_weight`).

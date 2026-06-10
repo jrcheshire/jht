@@ -1,6 +1,6 @@
 # jht — Accuracy (Phase-1 contract)
 
-The measured accuracy of the jht HEALPix inverse (`map2alm`), the ring-weight
+The measured accuracy of the jht HEALPix inverse (`analysis`, aka `map2alm`), the ring-weight
 algorithm behind it, and the committed tolerance. Companion to
 `docs/performance.md`. All numbers are float64, CPU, `jax 0.9.2`; reproduce with
 `pixi run python scripts/accuracy_sweep.py` and gate with
@@ -11,7 +11,7 @@ algorithm behind it, and the committed tolerance. Companion to
 HEALPix has **no sampling theorem**, so any HEALPix SHT is approximate. The
 quantity gated is the **broadband band-limited round-trip**: a random a_lm for a
 real spin-`s` field (`lmax ≈ nside`, below the `ℓ ≤ 1.5·nside` ceiling) is
-synthesized to a map and recovered with `map2alm`; the error is the max-abs
+synthesized to a map and recovered with `analysis`; the error is the max-abs
 difference from the known input a_lm.
 
 - **Committed gate:** weighted + `niter=3` round-trip ≤ **1e-4**, across
@@ -83,7 +83,7 @@ end-to-end performance is what matches).
 
 ## Iteration
 
-`map2alm` runs Jacobi / stationary-Richardson on the normal equations
+`analysis` runs Jacobi / stationary-Richardson on the normal equations
 `S^T W S a = S^T W m`: `a_{k+1} = a_k + A0 (m − S a_k)`. It converges because the
 HEALPix points are quasi-uniform; ring weights precondition it. `niter=3` is the
 default and reaches the floor above; `niter=0` is the bare weighted estimator.

@@ -21,7 +21,7 @@ Quick start::
     import jax; jax.config.update("jax_enable_x64", True)
     import jht
     m = jht.synthesis(alm, nside, lmax, spin=0)        # a_lm -> map
-    a = jht.map2alm(m, nside, lmax, spin=0, niter=3)   # map -> a_lm (weighted)
+    a = jht.analysis(m, nside, lmax, spin=0, niter=3)  # map -> a_lm (weighted)
 
 See ``README.md`` for the tour, ``docs/consumers.md`` for the downstream seam
 (e.g. using jht as a ducc0 replacement), and ``docs/gpu.md`` for the GPU story.
@@ -29,7 +29,7 @@ See ``README.md`` for the tour, ``docs/consumers.md`` for the downstream seam
 
 from __future__ import annotations
 
-from .analysis import bare_analysis, map2alm
+from ._analysis import analysis, bare_analysis, map2alm
 from .diff import (
     adjoint_synthesis_general_real,
     analysis_real,
@@ -67,9 +67,10 @@ __all__ = [
     # off-grid (arbitrary points / NUFFT) -- spin 0-3, alm- AND pointing-differentiable
     "synthesis_general",  # a_lm -> field at arbitrary (theta, phi)
     "adjoint_synthesis_general",  # its exact transpose
-    # analysis (approximate inverse)
-    "bare_analysis",  # A0 = S^T W
-    "map2alm",  # A0 + Jacobi iteration
+    # analysis (approximate inverse): map -> a_lm
+    "analysis",  # A0 + Jacobi iteration (canonical)
+    "map2alm",  # healpy-idiom alias of `analysis`
+    "bare_analysis",  # A0 = S^T W (the single-shot primitive)
     # quadrature weights
     "ring_weights",
     "pixel_weights",
@@ -80,7 +81,7 @@ __all__ = [
     "constrained_realization",  # posterior draw (constrained realization)
     # differentiable (real-DOF) interface
     "synthesis_real",  # S o T^-1 : R^n -> map
-    "analysis_real",  # T o map2alm : map -> R^n
+    "analysis_real",  # T o analysis : map -> R^n
     "synthesis_general_real",  # S_g o T^-1 : R^n -> field at arbitrary points
     "adjoint_synthesis_general_real",  # T o S_g^T : field -> R^n (exact transpose)
     "bandpower",  # angular auto-power C_ell

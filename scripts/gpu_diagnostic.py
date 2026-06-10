@@ -136,7 +136,7 @@ def _make_alm(lmax, spin, rng):
 
 
 def _clear_caches():
-    from jht import analysis as _analysis
+    from jht import _analysis  # the analysis impl module, for _wvec cache
     from jht import healpix as _healpix
 
     _healpix._prepare.cache_clear()

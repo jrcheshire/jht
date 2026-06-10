@@ -5,7 +5,7 @@ adjoint, ``A0 = S^T W``.  With ring weights (the default, :mod:`jht.weights`)
 ``W`` makes the m=0 colatitude quadrature exact across the band, dropping the
 floor from ~1e-3 (uniform ``4pi/Npix``) toward ~1e-4; ``use_weights=False``
 recovers the bare uniform estimator.  Neither is exact on HEALPix (no sampling
-theorem), so :func:`map2alm` adds a Jacobi / stationary-Richardson iteration on
+theorem), so :func:`analysis` adds a Jacobi / stationary-Richardson iteration on
 the residual,
 
     a_{k+1} = a_k + A0 (map - S a_k),
@@ -43,7 +43,7 @@ def bare_analysis(maps, nside: int, lmax: int, spin: int = 0, use_weights: bool 
     return adjoint_synthesis(wmaps, nside, lmax, spin)
 
 
-def map2alm(
+def analysis(
     maps, nside: int, lmax: int, spin: int = 0, niter: int = 3, use_weights: bool = True
 ) -> jax.Array:
     """Approximate inverse with ``niter`` Jacobi refinement steps (``niter=0`` = bare)."""
@@ -52,3 +52,7 @@ def map2alm(
         residual = maps - synthesis(a, nside, lmax, spin)
         a = a + bare_analysis(residual, nside, lmax, spin, use_weights)
     return a
+
+
+# healpy-idiom alias (back-compat; ``analysis`` is the canonical name).
+map2alm = analysis

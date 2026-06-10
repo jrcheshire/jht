@@ -35,7 +35,7 @@ jax.config.update("jax_enable_x64", True)
 import numpy as np  # noqa: E402
 
 import jht  # noqa: E402
-from jht import analysis as _analysis  # noqa: E402
+from jht import _analysis  # noqa: E402  (the analysis impl module, for _wvec cache)
 from jht import healpix as _healpix  # noqa: E402
 
 # nside -> lmax (BK regime caps lmax ~ 1000; below that ~1.5*nside)

@@ -18,8 +18,8 @@ rationale — and the accuracy boundary versus a C++ production transform — is
 Validated by a gated suite (190 tests, float64) against **healpy** and **ducc0**:
 
 - **On-grid transforms** — spin-0 & spin-2 synthesis (`aₗₘ→map`), its exact
-  adjoint `Sᵀ`, and a weighted + Jacobi-iterated inverse (`map2alm`), to machine
-  precision versus healpy and ducc0.
+  adjoint `Sᵀ`, and a weighted + Jacobi-iterated inverse (`analysis`, aka
+  `map2alm`), to machine precision versus healpy and ducc0.
 - **Off-grid (NUFFT)** — evaluate a band-limited field at **arbitrary pointings**
   (spin 0–3), differentiable in **both** the aₗₘ and the pointings.
 - **Differentiable** — native JAX autodiff throughout (`jacfwd ≡ jacrev`, tight
@@ -66,19 +66,21 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jht
 
-nside, lmax, spin = 256, 512, 0
-m  = jht.synthesis(alm, nside, lmax, spin=spin)        # aₗₘ -> map
-a  = jht.map2alm(m, nside, lmax, spin=spin, niter=3)   # map -> aₗₘ (weighted + iterated)
-cl = jht.bandpower(a, lmax, spin=spin)                 # angular auto-power C_ℓ
+nside, lmax = 256, 512
+m = jnp.asarray(my_map)                       # your (12*nside**2,) HEALPix RING map (spin 0)
 
-# off-grid: evaluate at arbitrary pointings; loc is (npts, 2) of [theta, phi]
-loc = jnp.stack([theta, phi], axis=-1)
-f   = jht.synthesis_general(alm, loc, spin=spin, lmax=lmax)
+alm = jht.analysis(m, nside, lmax, niter=3)   # map -> aₗₘ  (healpy-packed; weighted + iterated)
+cl  = jht.bandpower(alm, lmax)                # angular auto-power C_ℓ
+m2  = jht.synthesis(alm, nside, lmax)         # aₗₘ -> map  (round-trips m)
+
+# off-grid: evaluate the same aₗₘ at arbitrary pointings (theta, phi)
+loc = jnp.stack([theta, phi], axis=-1)        # (npts, 2)
+f   = jht.synthesis_general(alm, loc, lmax=lmax)
 ```
 
 `spin=2` takes/returns `(E, B)` aₗₘ of shape `(2, …)` and `(Q, U)` maps of shape
 `(2, npix)`. `jht.adjoint_synthesis` is the **exact unweighted transpose** `Sᵀ`
-(the operator seam / VJP), distinct from `map2alm` (the approximate inverse). For
+(the operator seam / VJP), distinct from `analysis` (the approximate inverse). For
 gradient-based work use the real-DOF layer `jht.synthesis_real` /
 `jht.analysis_real` (plain ℝⁿ→ℝᵐ — no complex-conjugate convention to track).
 
@@ -102,11 +104,11 @@ weight-solve algorithm: [`docs/accuracy.md`](docs/accuracy.md).
 
 Pure JAX runs unchanged on CUDA. Measured on A100 (incl. a 20 GB MIG) / V100, fp64:
 
-- **GPU==CPU parity ~1e-13** through nside=2048 (synthesis and `map2alm`).
+- **GPU==CPU parity ~1e-13** through nside=2048 (synthesis and `analysis`).
 - **Forward synthesis 14–60×** the 8-core CPU; fp64/fp32 ≈ 2.2×.
 - **Off-grid forward** ~0.5–0.9 s at ℓ_max=1000 — independent of the number of
   points (recursion-bound) — with the pointing gradient ~1× a forward.
-- **nside=2048** compiles and runs on a ~20 GB GPU slice (synthesis + `map2alm`);
+- **nside=2048** compiles and runs on a ~20 GB GPU slice (synthesis + `analysis`);
   the one-time compile is multi-minute (jit-cached).
 
 The recurring GPU lesson: fp64/complex scatters are catastrophic on GPU, so jht

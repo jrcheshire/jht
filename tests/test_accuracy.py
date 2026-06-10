@@ -1,7 +1,7 @@
 """Gate A (M3): broadband weighted accuracy -- the Phase-1 accuracy contract.
 
 A random *broadband* band-limited a_lm (a real field; no ``l < |spin|`` modes) is
-synthesized to a map and recovered with :func:`jht.analysis.map2alm`.  The
+synthesized to a map and recovered with :func:`jht.analysis`.  The
 committed a-priori contract is
 
     weighted + niter=3 round-trip error <= 1e-4
@@ -21,7 +21,7 @@ jax.config.update("jax_enable_x64", True)
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from jht.analysis import map2alm  # noqa: E402
+from jht import map2alm  # noqa: E402  (alias of jht.analysis -- back-compat coverage)
 from jht.healpix import alm_size, synthesis  # noqa: E402
 
 GATE_A = 1e-4  # a-priori committed contract (weighted + niter=3)

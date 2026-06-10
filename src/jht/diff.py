@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .analysis import map2alm
+from ._analysis import analysis
 from .healpix import alm_metric_weight, synthesis
 from .masked import alm_to_real, n_dof, real_to_alm
 from .offgrid import adjoint_synthesis_general, synthesis_general
@@ -64,11 +64,11 @@ def synthesis_real(x, nside: int, lmax: int, spin: int = 0) -> jax.Array:
 def analysis_real(
     maps, nside: int, lmax: int, spin: int = 0, niter: int = 3, use_weights: bool = True
 ) -> jax.Array:
-    """``T o map2alm``: map -> real-DOF vector ``x`` (iterated approximate inverse).
+    """``T o analysis``: map -> real-DOF vector ``x`` (iterated approximate inverse).
 
-    The real-DOF dual of :func:`jht.analysis.map2alm`; AD-clean in both modes.
+    The real-DOF dual of :func:`jht.analysis`; AD-clean in both modes.
     """
-    a = map2alm(maps, nside, lmax, spin=spin, niter=niter, use_weights=use_weights)
+    a = analysis(maps, nside, lmax, spin=spin, niter=niter, use_weights=use_weights)
     return alm_to_real(a, lmax, spin)
 
 

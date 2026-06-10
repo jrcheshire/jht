@@ -21,7 +21,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 import jht  # noqa: E402
-from jht import analysis as _analysis  # noqa: E402
+from jht import _analysis  # noqa: E402  (the analysis impl module, for _wvec cache)
 from jht import healpix as _healpix  # noqa: E402
 
 

@@ -16,10 +16,10 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 import jht  # noqa: E402
-from jht import analysis, diff, healpix, masked, offgrid, weights  # noqa: E402
+from jht import _analysis, diff, healpix, masked, offgrid, weights  # noqa: E402
 
 EXPECTED = {
-    "synthesis", "adjoint_synthesis", "bare_analysis", "map2alm",
+    "synthesis", "adjoint_synthesis", "analysis", "map2alm", "bare_analysis",
     "synthesis_general", "adjoint_synthesis_general",
     "ring_weights", "pixel_weights", "pseudo_alm", "deconvolve",
     "wiener", "constrained_realization",
@@ -50,8 +50,10 @@ def test_reexports_are_the_real_objects():
     assert jht.adjoint_synthesis_general is offgrid.adjoint_synthesis_general
     assert jht.alm_size is healpix.alm_size
     assert jht.alm_metric_weight is healpix.alm_metric_weight
-    assert jht.map2alm is analysis.map2alm
-    assert jht.bare_analysis is analysis.bare_analysis
+    assert jht.analysis is _analysis.analysis
+    assert jht.map2alm is _analysis.map2alm
+    assert jht.map2alm is jht.analysis  # map2alm is the back-compat alias of analysis
+    assert jht.bare_analysis is _analysis.bare_analysis
     assert jht.ring_weights is weights.ring_weights
     assert jht.pixel_weights is weights.pixel_weights
     assert jht.pseudo_alm is masked.pseudo_alm

@@ -9,7 +9,7 @@ Conventions (verified vs healpy / ducc0; see ``docs/design.md``):
   (matches healpy ``pixwin=False``).
 
 ``synthesis`` is ``S: a_lm -> map``.  ``adjoint_synthesis`` is the *exact*
-transpose ``S^T = Y^T`` (unweighted; **not** the weighted map2alm), which is the
+transpose ``S^T = Y^T`` (unweighted; **not** the weighted analysis), which is the
 operator the bk-jax seam needs and the VJP of synthesis.
 
 **Phase-1 fast path.**  The transforms are vectorized over m (one fused
@@ -17,7 +17,7 @@ operator the bk-jax seam needs and the VJP of synthesis.
 ring length (the equatorial belt in one FFT; the polar cap by length-group), and
 are ``jit``-compiled.  Geometry, recursion plans, and index maps are built once
 per ``(nside, lmax, spin)`` and cached (``lru_cache`` on :func:`_prepare`), so the
-Jacobi iteration in :func:`jht.analysis.map2alm` reuses one compiled kernel.
+Jacobi iteration in :func:`jht.analysis` reuses one compiled kernel.
 Numerics are identical to the eager Phase-0 reference (:mod:`jht._reference`),
 which is retained as a validation oracle.  Library code does not enable x64;
 callers opt in per entry point.
@@ -337,7 +337,7 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     """``S^T = Y^H : map -> a_lm`` -- the *exact* transpose of :func:`synthesis`.
 
     ``b_{l,m} = sum_p conj(Y_{l,m}(p)) m_p``.  This is **not** the weighted
-    map2alm (the approximate inverse); it is the operator the bk-jax seam needs
+    analysis (the approximate inverse); it is the operator the bk-jax seam needs
     and the cotangent of synthesis, satisfying
 
         adjoint_synthesis(v) == (Npix / 4pi) * healpy.map2alm(v, iter=0)   (no weights)

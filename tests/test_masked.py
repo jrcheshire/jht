@@ -31,7 +31,7 @@ jax.config.update("jax_enable_x64", True)
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from jht.analysis import map2alm  # noqa: E402
+from jht import map2alm  # noqa: E402  (alias of jht.analysis -- back-compat coverage)
 from jht.healpix import adjoint_synthesis, alm_size, synthesis  # noqa: E402
 from jht.masked import alm_to_real, deconvolve, n_dof, pseudo_alm, real_to_alm  # noqa: E402
 from jht.weights import pixel_weights  # noqa: E402

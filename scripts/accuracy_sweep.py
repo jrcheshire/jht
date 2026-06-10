@@ -25,7 +25,7 @@ jax.config.update("jax_enable_x64", True)
 
 import numpy as np  # noqa: E402
 
-from jht.analysis import map2alm  # noqa: E402
+from jht import map2alm  # noqa: E402  (alias of jht.analysis)
 from jht.healpix import alm_size, synthesis  # noqa: E402
 
 LADDER = [(32, 32), (64, 64), (128, 128), (256, 256), (512, 512)]

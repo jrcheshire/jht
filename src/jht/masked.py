@@ -5,7 +5,7 @@ in ``[0,1]``):
 
 1. :func:`pseudo_alm` -- the **masked pseudo-a_lm** (zero-fill): mask the *map*,
    keep the *full* quadrature weights, run the existing full-residual Jacobi
-   (:func:`jht.analysis.map2alm`).  This is the standard CMB pseudo-a_lm; with
+   (:func:`jht.analysis`).  This is the standard CMB pseudo-a_lm; with
    uniform weights (``use_weights=False``) it is exactly
    ``(4pi/Npix) S^T (M m)`` -- the weight-unambiguous estimator that healpy/ducc
    compute.  It is *biased* by mode-coupling (the cut mixes ell, m): it does not
@@ -17,7 +17,7 @@ in ``[0,1]``):
        A = S^T (M W) S,    b = S^T (M W) m .
 
    ``A`` is the masked least-squares operator; it reduces to ``S^T W S ~ I`` as
-   ``M -> 1`` (so CG -> full-sky :func:`map2alm` in ~1 step).  For noiseless
+   ``M -> 1`` (so CG -> full-sky :func:`jht.analysis` in ~1 step).  For noiseless
    band-limited data ``m = S a_true`` it recovers ``a = a_true`` *exactly* and
    *independently of W* wherever the cut leaves the modes constrained (where ``A``
    restricted to the active band is well-conditioned).  Near-null modes
@@ -58,7 +58,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.sparse.linalg import cg
 
-from .analysis import map2alm
+from ._analysis import analysis
 from .healpix import adjoint_synthesis, alm_size, synthesis
 from .weights import pixel_weights
 
@@ -92,7 +92,7 @@ def _weight_pix(nside: int, spin: int, *, inv_noise=None, mask=None, use_weights
 # masked pseudo-a_lm (zero-fill)
 # --------------------------------------------------------------------------- #
 def pseudo_alm(maps, mask, nside: int, lmax: int, spin: int = 0, niter: int = 3, use_weights: bool = True) -> jax.Array:
-    """Masked pseudo-a_lm: ``map2alm(M * map)`` (zero-fill, healpy/ducc-style).
+    """Masked pseudo-a_lm: ``analysis(M * map)`` (zero-fill, healpy/ducc-style).
 
     With ``use_weights=False, niter=0`` this is the canonical uniform pseudo-a_lm
     ``(4pi/Npix) S^T (M m)``; with ring weights / iteration it is jht's own
@@ -103,7 +103,7 @@ def pseudo_alm(maps, mask, nside: int, lmax: int, spin: int = 0, niter: int = 3,
     maps = jnp.asarray(maps)
     msk = jnp.asarray(mask)
     masked = (msk if spin == 0 else msk[None, :]) * maps
-    return map2alm(masked, nside, lmax, spin=spin, niter=niter, use_weights=use_weights)
+    return analysis(masked, nside, lmax, spin=spin, niter=niter, use_weights=use_weights)
 
 
 # --------------------------------------------------------------------------- #

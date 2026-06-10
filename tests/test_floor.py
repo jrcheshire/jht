@@ -1,6 +1,6 @@
 """Spin2-floor gate (L2, the make-or-break): the spin-2 HEALPix inverse.
 
-Exercises the committed ``jht.analysis.map2alm`` (bare + Jacobi) on the single
+Exercises the committed ``jht.analysis`` (bare + Jacobi) on the single
 modes where s2fft's spin-2 inverse fails (l0=8, m<l0 errors of 28-35%). jht must
 instead sit at the HEALPix ~1e-3 floor (no m<l defect) and iterate toward machine
 precision on band-limited input.
@@ -18,7 +18,7 @@ jax.config.update("jax_enable_x64", True)
 
 import numpy as np  # noqa: E402
 
-from jht.analysis import map2alm  # noqa: E402
+from jht import map2alm  # noqa: E402  (alias of jht.analysis -- back-compat coverage)
 from jht.healpix import alm_column_base, alm_size, synthesis  # noqa: E402
 
 NSIDE, LMAX, L0 = 8, 12, 8  # l0=8 is below the l <= 1.5*nside = 18 ceiling

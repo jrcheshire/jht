@@ -28,7 +28,7 @@ place of ducc0* for its GPU/differentiable tier, but nothing below is BK-specifi
 |------|--------------|-------|
 | `aₗₘ → map` | `jht.synthesis(alm, nside, lmax, spin)` | spin ∈ {0, 2}; spin-2 takes `(E,B)`, returns `(Q,U)` |
 | `map → aₗₘ`, **exact transpose** `Sᵀ` | `jht.adjoint_synthesis(m, nside, lmax, spin)` | the *unweighted* adjoint — the operator a matrix-free solver / VJP needs, **not** an inverse |
-| `map → aₗₘ`, approximate **inverse** | `jht.map2alm(m, …, niter=3)` | ring weights + Jacobi iteration (the healpy-`map2alm` analogue) |
+| `map → aₗₘ`, approximate **inverse** | `jht.analysis(m, …, niter=3)` | ring weights + Jacobi iteration (the healpy-`map2alm` analogue; `jht.map2alm` is a back-compat alias) |
 | **off-grid** `aₗₘ → field` at arbitrary points | `jht.synthesis_general(alm, loc, *, spin, lmax, epsilon=1e-10)` | the **ducc0 `synthesis_general` replacement**; spin ∈ {0,1,2,3}; `loc (npts,2) = (θ,φ)`; alm- **and** pointing-differentiable |
 | off-grid exact transpose | `jht.adjoint_synthesis_general(field, loc, *, spin, lmax, epsilon)` | the `adjoint_synthesis_general` replacement |
 | masked analysis | `jht.pseudo_alm`, `jht.deconvolve` | zero-fill pseudo-aₗₘ; cut-sky CG deconvolution |
