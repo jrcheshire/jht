@@ -82,6 +82,7 @@ healpy = "*"
 pytest = "*"
 ruff = "*"
 mypy = "*"
+pytest-xdist = ">=3.8.0,<4"
 
 [tool.pixi.tasks]
 test = "pytest"                       # full suite (local default + nightly + pre-release)
