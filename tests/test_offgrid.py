@@ -32,7 +32,7 @@ from jht.offgrid import adjoint_synthesis_general, synthesis_general  # noqa: E4
 # `slow` so it runs in the full suite (`pixi run test`) + nightly, not the fast per-push gate.
 pytestmark = pytest.mark.slow
 
-FWD_TOL = 1e-9  # a-priori off-grid tier (epsilon=1e-10 + headroom); see ROADMAP Phase 4
+FWD_TOL = 1e-9  # a-priori off-grid tier (epsilon=1e-10 + headroom)
 ADJ_TOL = 1e-12  # algebraic adjoint identity (epsilon-independent)
 BRIDGE_TOL = 1e-12  # native VJP == G * conj(adjoint)
 DUCC_TOL = 1e-9  # cross-check vs ducc (both approximate the same field to their eps)

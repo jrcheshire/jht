@@ -132,4 +132,3 @@ wiring lives in the consumer, not here.
 - [`docs/gpu.md`](docs/gpu.md) — the GPU env, the x64 requirement, the harness.
 - [`docs/consumers.md`](docs/consumers.md) — the downstream-dependency seam.
 - [`docs/motivation.md`](docs/motivation.md) — why jht exists.
-- [`ROADMAP.md`](ROADMAP.md) — phased plan + gates.

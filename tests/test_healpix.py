@@ -27,7 +27,7 @@ from jht.healpix import (  # noqa: E402
     synthesis,
 )
 
-S_SYNTH_TOL = 1e-10  # a-priori (ROADMAP Phase-0)
+S_SYNTH_TOL = 1e-10  # a-priori
 ADJ_TOL = 1e-10
 
 

@@ -29,7 +29,7 @@ from jht._recursion import (  # noqa: E402
     wigner_d_column,
 )
 
-GATE_R_RTOL = 1e-12  # a-priori, per ROADMAP Phase-0; not relaxed without sign-off
+GATE_R_RTOL = 1e-12  # a-priori gate; not relaxed without sign-off
 
 
 # --------------------------------------------------------------------------- #
