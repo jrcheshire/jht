@@ -7,9 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-- **Faster CI** — the heavy off-grid oracle suite is marked `slow` and excluded from
-  the per-push gate (`pixi run test-fast`); the full suite runs in a nightly workflow
-  (and `pixi run test`). ~40% faster per-push CI, no coverage lost.
+- **CI** — `slow` marker splits the heavy off-grid oracle suite out of the fast
+  subset (`pixi run test-fast`); the full suite runs via `pixi run test`. CI workflows
+  (`test.yml`, `full-suite.yml`) are **manual-only** (`workflow_dispatch`) so they
+  never auto-burn runner minutes.
 - Pixi manifest table `[tool.pixi.project]` → `[tool.pixi.workspace]` (the deprecated
   form).
 

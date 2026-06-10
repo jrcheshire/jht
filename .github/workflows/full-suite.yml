@@ -1,0 +1,24 @@
+name: full suite (manual)
+
+# MANUAL ONLY. The full gated suite incl. the heavy `slow` off-grid oracle/analytic
+# sweeps -- minutes-expensive. Deliberately NOT on a schedule (a daily cron would
+# silently burn runner minutes). Run it on demand from the Actions tab before a
+# release, or rely on local `pixi run test`.
+on:
+  workflow_dispatch:
+
+jobs:
+  full-suite:
+    name: Full suite incl. slow (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.10
+        with:
+          locked: true
+          cache: true
+
+      - name: Test (full -- incl. `slow`)
+        run: pixi run test

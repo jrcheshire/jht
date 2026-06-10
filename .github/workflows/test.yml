@@ -1,13 +1,10 @@
 name: test
 
+# MANUAL ONLY. Deliberately NOT triggered on push/PR: the suite is minutes-expensive
+# and frequent pushes to `main` would burn runner minutes. Run it on demand from the
+# Actions tab (or `gh workflow run test.yml`), or rely on local `pixi run test`.
 on:
-  push:
-    branches: [main]
-  pull_request:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  workflow_dispatch:
 
 jobs:
   lint-and-test:
@@ -32,7 +29,7 @@ jobs:
 
       # The default pixi env pulls the ducc0/healpy oracles, so this is the gated
       # parity suite (CPU, float64). The GPU parity gate auto-skips (no device). The
-      # heavy off-grid oracle sweeps are marked `slow` and run by nightly.yml instead,
-      # keeping the per-push gate fast; the full suite runs there + pre-release.
-      - name: Test (fast gate -- `not slow`)
+      # heavy off-grid oracle sweeps are marked `slow` and excluded here; run the full
+      # suite via full-suite.yml (manual) or `pixi run test` locally / pre-release.
+      - name: Test (fast subset -- `not slow`)
         run: pixi run test-fast
