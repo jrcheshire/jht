@@ -109,10 +109,35 @@ def _relerr(a, b) -> float:
     return float(np.max(np.abs(a - b))) / denom
 
 
+def _safe_relerr(make_gpu, make_cpu) -> float | str:
+    """``relerr(make_gpu(), make_cpu())`` but report OOM / ptxas / error in-band, so a
+    small gpu_requeue slice (a 5 GB MIG can't hold nside=2048 map2alm at runtime) still
+    yields the row -- the synth parity is reported even when map2alm OOMs."""
+    try:
+        return _relerr(make_gpu(), make_cpu())
+    except Exception as exc:  # noqa: BLE001 -- in-band slice/compile failure reporting
+        low = f"{type(exc).__name__}: {exc}".lower()
+        if "ptxas" in low:
+            return "ptxas-FAIL"
+        if "resource_exhausted" in low or "out of memory" in low:
+            return "OOM"
+        return f"ERR:{type(exc).__name__}"
+
+
+def _efmt(x) -> str:
+    return f"{x:.2e}" if isinstance(x, float) else str(x)
+
+
 def parity(nside, lmax, spin, cpu, gpu, rng) -> dict:
     alm, m0 = _inputs(nside, lmax, spin, rng)
-    syn = _relerr(_run_synth_on(gpu, alm, nside, lmax, spin), _run_synth_on(cpu, alm, nside, lmax, spin))
-    m2a = _relerr(_run_m2a_on(gpu, m0, nside, lmax, spin), _run_m2a_on(cpu, m0, nside, lmax, spin))
+    syn = _safe_relerr(
+        lambda: _run_synth_on(gpu, alm, nside, lmax, spin),
+        lambda: _run_synth_on(cpu, alm, nside, lmax, spin),
+    )
+    m2a = _safe_relerr(
+        lambda: _run_m2a_on(gpu, m0, nside, lmax, spin),
+        lambda: _run_m2a_on(cpu, m0, nside, lmax, spin),
+    )
     return dict(nside=nside, lmax=lmax, spin=spin, synth_relerr=syn, map2alm_relerr=m2a)
 
 
@@ -163,7 +188,7 @@ def main():
             for spin in (0, 2):
                 r = parity(nside, lmax, spin, cpu, gpu, rng)
                 print(f"{r['nside']:>5} {r['lmax']:>5} {r['spin']:>4} "
-                      f"{r['synth_relerr']:>14.2e} {r['map2alm_relerr']:>15.2e}", flush=True)
+                      f"{_efmt(r['synth_relerr']):>14} {_efmt(r['map2alm_relerr']):>15}", flush=True)
         print()
     else:
         print("== parity skipped (no GPU visible) -- run on the NVIDIA box ==\n")
