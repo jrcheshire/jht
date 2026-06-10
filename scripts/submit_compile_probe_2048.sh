@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cannon SLURM submission to CHARACTERIZE the nside=2048 on-grid compile (item 2).
+# SLURM submission to CHARACTERIZE the nside=2048 on-grid compile (item 2).
 # The first probe (profile_offgrid_20592188) showed the ~nside-way FFT-unroll -- not the
 # map scatter -- is the compile wall (nogath=158s @ nside=1024) and nside=2048 only
 # *timed out mid-compile* with OOM events, so we have no 2048 verdict.  This run gives the
@@ -10,13 +10,13 @@
 #
 # Pre-install once (see submit_gpu_diagnostic.sh): CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
-# Usage (from the repo root on Cannon):
+# Usage (from the repo root on the cluster):
 #     cd ~/jht && sbatch scripts/submit_compile_probe_2048.sh
 #
 # Output -> runs/gpu-diag/compile2048_<jobid>.{out,err} (copy the .out back to analyze).
 
 #SBATCH --job-name=jht-compile-2048
-#SBATCH --account=kovac_lab
+# #SBATCH --account=<your-slurm-account>   # or: export SBATCH_ACCOUNT=<acct>
 #SBATCH --partition=gpu_requeue
 #SBATCH --gres=gpu:1
 #SBATCH --time=02:00:00

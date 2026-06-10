@@ -19,7 +19,7 @@ Columns (ms):  syn  chan  sc_pos  sc_neg  c2f  cset  ifft2  gath_sum  | sum | cs
   -> the N-independent columns should be ~constant as npts grows (re-confirms the
      35 s is N-independent); only `syn` and `gath_sum` should move with npts.
 
-GPU-only pathology.  Run on Cannon:
+GPU-only pathology.  Run on a SLURM GPU cluster:
     pixi run -e gpu python scripts/profile_offgrid_forward.py [--spin 0|2] \
         [--lmax 1000] [--npts 200000,1000000] [--dtype fp32]
 """

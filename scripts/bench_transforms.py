@@ -28,7 +28,7 @@ import numpy as np  # noqa: E402
 from jht import map2alm  # noqa: E402  (alias of jht.analysis)
 from jht.healpix import adjoint_synthesis, alm_size, synthesis  # noqa: E402
 
-# nside -> lmax: the BK regime caps lmax ~ 1000; below that use ~1.5*nside.
+# nside -> lmax: the band-limit caps lmax ~ 1000; below that use ~1.5*nside.
 LADDER = [
     (32, 48),
     (128, 192),

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cannon SLURM submission for BOTH this session's perf probes -- one slot answers both
+# SLURM submission for both perf probes -- one slot answers both
 # gating measurements before any refactor:
 #   1) profile_offgrid_forward.py -- pins which N-independent stage carries the off-grid
 #      forward ~35 s phantom at lmax=1000 (leading suspect: the nufft2d2 grid-build
@@ -12,13 +12,13 @@
 #
 # Pre-install once (see submit_gpu_diagnostic.sh): CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
-# Usage (from the repo root on Cannon):
+# Usage (from the repo root on the cluster):
 #     cd ~/jht && sbatch scripts/submit_profile_offgrid.sh
 #
 # Output -> runs/gpu-diag/profile_offgrid_<jobid>.{out,err} (copy the .out back to analyze).
 
 #SBATCH --job-name=jht-perf-probes
-#SBATCH --account=kovac_lab
+# #SBATCH --account=<your-slurm-account>   # or: export SBATCH_ACCOUNT=<acct>
 #SBATCH --partition=gpu_requeue
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:00:00

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cannon SLURM submission for the jht single-slot GPU performance diagnostic
+# SLURM submission for the jht single-slot GPU performance diagnostic
 # (scripts/gpu_diagnostic.py). jht's GPU numbers have been deferred -- never
 # measured; this is the one-shot run that captures them.
 #
@@ -19,14 +19,14 @@
 # easily; the defaults below are a middle ground -- bump --time AND MAX_WALL
 # together if you want the full ladder to finish on a slow MIG.
 #
-# PRE-INSTALL ONCE from any networked CPU node -- a login node, or a group dev node
-# like bicep-dev. This downloads + links the CUDA packages into ./.pixi on global
+# PRE-INSTALL ONCE from any networked CPU node -- a login or dev node. This
+# downloads + links the CUDA packages into ./.pixi on global
 # home, which the gpu_requeue GPU node then reads (so the GPU job needs no network).
 # Such nodes have no GPU, so mock the CUDA driver virtual package (__cuda) for the
 # solve; the real driver is detected at runtime on the GPU node:
 #     cd ~/jht && CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
-# Usage (from the repo root on Cannon):
+# Usage (from the repo root on the cluster):
 #     cd ~/jht
 #     sbatch scripts/submit_gpu_diagnostic.sh
 #     # longer slot for the full ladder on a slow MIG:
@@ -39,7 +39,7 @@
 #            analyze locally). runs/ is gitignored.
 
 #SBATCH --job-name=jht-gpu-diag
-#SBATCH --account=kovac_lab
+# #SBATCH --account=<your-slurm-account>   # or: export SBATCH_ACCOUNT=<acct>
 #SBATCH --partition=gpu_requeue
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:30:00

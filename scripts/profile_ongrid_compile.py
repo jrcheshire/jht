@@ -23,7 +23,7 @@ Verdict:
 
 Also asserts asm_gather == asm_full bit-identically at a small nside (the on-CPU
 correctness gate for the 2b assembly).  spin-0 only; spin-2 (`synth2`) is structurally
-identical.  Columns are compile(+first-run) ms and steady-run ms.  Run on Cannon:
+identical.  Columns are compile(+first-run) ms and steady-run ms.  Run on a GPU cluster:
     pixi run -e gpu python scripts/profile_ongrid_compile.py [--nsides 1024,2048] [--dtype fp32]
 """
 

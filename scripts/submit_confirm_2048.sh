@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cannon SLURM submission to CONFIRM the real on-grid transform at nside=2048 (item 2).
+# SLURM submission to CONFIRM the real on-grid transform at nside=2048 (item 2).
 # The combined-gather ring assembly (commit 83993fa) FIXED the nside=2048 compile: the
 # old per-group scatter ptxas-FAILed, the gather's jit_synth compiles and synth runs at
 # nside=2048 (verified -- ran even on a 5 GB MIG; only map2alm OOMed there at runtime for
@@ -10,19 +10,18 @@
 #
 # Pre-install once (see submit_gpu_diagnostic.sh): CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
-# Usage (from the repo root on Cannon):
+# Usage (from the repo root on the cluster):
 #     cd ~/jht && sbatch scripts/submit_confirm_2048.sh
 #
 # Output -> runs/gpu-diag/confirm2048_<jobid>.{out,err} (copy the .out back to analyze).
 
 # Slice: request a specific 20 GB A100 MIG on the gpu_test partition (guaranteed size,
-# vs gpu_requeue's random 5/10/20 GB) -- see FASRC docs "Using GPUs".  20 GB holds the
-# nside=2048 synth AND map2alm at runtime (a 5 GB MIG OOMed map2alm).  gpu_test caps each
-# MIG at <64 GB RAM / <8 CPUs and 12 h, so --mem=60G / -c 4 stay under the limit (the
-# gather'd synth compiles well under 60 G host RAM).  (Drop --account if it is rejected
-# on gpu_test; it only sets fairshare.)
+# vs gpu_requeue's random 5/10/20 GB).  20 GB holds the nside=2048 synth AND map2alm at
+# runtime (a 5 GB MIG OOMed map2alm).  gpu_test caps each MIG at <64 GB RAM / <8 CPUs and
+# 12 h, so --mem=60G / -c 4 stay under the limit (the gather'd synth compiles well under
+# 60 G host RAM).
 #SBATCH --job-name=jht-confirm-2048
-#SBATCH --account=kovac_lab
+# #SBATCH --account=<your-slurm-account>   # or: export SBATCH_ACCOUNT=<acct>
 #SBATCH --partition=gpu_test
 #SBATCH --gres=gpu:nvidia_a100_3g.20gb:1
 #SBATCH --time=02:00:00

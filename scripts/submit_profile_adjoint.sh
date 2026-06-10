@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cannon SLURM submission for the adjoint-stage profiler (scripts/profile_adjoint.py).
+# SLURM submission for the adjoint-stage profiler (scripts/profile_adjoint.py).
 # Profile-confirmation step before the on-grid scatter refactor: isolates the
 # ring-assembly vs recursion-adjoint stages on GPU, in fp64 and fp32, to pin the
 # bottleneck (and to check whether the recursion alone compiles at nside=2048 where
@@ -7,13 +7,13 @@
 #
 # Pre-install once (see submit_gpu_diagnostic.sh): CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
-# Usage (from the repo root on Cannon):
+# Usage (from the repo root on the cluster):
 #     cd ~/jht && sbatch scripts/submit_profile_adjoint.sh
 #
 # Output -> runs/gpu-diag/profile_<jobid>.{out,err} (copy the .out back to analyze).
 
 #SBATCH --job-name=jht-profile-adj
-#SBATCH --account=kovac_lab
+# #SBATCH --account=<your-slurm-account>   # or: export SBATCH_ACCOUNT=<acct>
 #SBATCH --partition=gpu_requeue
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00

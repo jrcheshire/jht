@@ -3,11 +3,11 @@
 jht is pure JAX, so the transforms run on a CUDA GPU with no code change. This
 script validates and characterizes that on hardware::
 
-    pixi run -e gpu python scripts/gpu_check.py            # on an NVIDIA box (Cannon)
+    pixi run -e gpu python scripts/gpu_check.py            # on an NVIDIA box
     pixi run -e gpu python scripts/gpu_check.py --max 1024
 
 It (1) reports the visible devices; (2) if a GPU is present, checks **fp64 parity
-GPU-vs-CPU** to ~1e-12 across the BK regime; (3) times synthesis / adjoint /
+GPU-vs-CPU** to ~1e-12 across the supported regime; (3) times synthesis / adjoint /
 map2alm and a ``vmap``-over-realizations batch on the default device; (4) reports
 host peak RSS and (on GPU) device peak bytes.
 
@@ -38,7 +38,7 @@ import jht  # noqa: E402
 from jht import _analysis  # noqa: E402  (the analysis impl module, for _wvec cache)
 from jht import healpix as _healpix  # noqa: E402
 
-# nside -> lmax (BK regime caps lmax ~ 1000; below that ~1.5*nside)
+# nside -> lmax (the band-limit caps lmax ~ 1000; below that ~1.5*nside)
 LADDER = [(64, 96), (128, 192), (256, 384), (512, 768), (1024, 1000), (2048, 1000)]
 
 

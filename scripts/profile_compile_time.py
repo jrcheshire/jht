@@ -23,7 +23,7 @@ Per nside it reports:
 
 `synth_c ~= rec_c + asm_c` attributes the compile (XLA fuses, so approximate).  In-band
 ptxas/OOM reporting.  spin-0 (`synth`); spin-2 (`synth2`) is the same unroll, two
-channels.  Run on Cannon (a 20 GB MIG holds nside=2048):
+channels.  Run on a SLURM GPU cluster (a 20 GB MIG holds nside=2048):
     pixi run -e gpu python scripts/profile_compile_time.py [--nsides 256,512,1024,2048]
 CPU compiles too (slower) -- fine for the scaling shape without a GPU slot; use
 `--skip-synth` and small nsides for a quick local check.

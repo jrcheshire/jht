@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cannon SLURM submission to CHARACTERIZE the nside>=1024 on-grid compile time (v0.1.1
+# SLURM submission to CHARACTERIZE the nside>=1024 on-grid compile time (v0.1.1
 # item 2).  The nside=2048 ptxas-FAIL is fixed (combined-gather de-unroll, 83993fa); this
 # measures the remaining multi-minute COMPILE and attributes it between the Legendre
 # recursion and the per-ring-length FFT-unroll assembly (scripts/profile_compile_time.py).
@@ -8,7 +8,7 @@
 #
 # Pre-install once (see submit_gpu_diagnostic.sh): CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
-# Usage (from the repo root on Cannon):
+# Usage (from the repo root on the cluster):
 #     cd ~/jht && sbatch scripts/submit_profile_compile.sh
 #
 # Output -> runs/gpu-diag/profile_compile_<jobid>.{out,err} (copy the .out back to analyze).
@@ -18,7 +18,7 @@
 # per MIG, so --mem=60G / -c 4 stay under.  --time generous: the nside=2048 synth compile
 # alone is multi-minute and the probe compiles it plus the asm/rec stages at four nsides.
 #SBATCH --job-name=jht-profile-compile
-#SBATCH --account=kovac_lab
+# #SBATCH --account=<your-slurm-account>   # or: export SBATCH_ACCOUNT=<acct>
 #SBATCH --partition=gpu_test
 #SBATCH --gres=gpu:nvidia_a100_3g.20gb:1
 #SBATCH --time=02:00:00

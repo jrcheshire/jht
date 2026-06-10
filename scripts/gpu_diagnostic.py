@@ -1,7 +1,7 @@
 """Single-shot large-scale GPU performance diagnostic for jht.
 
 Designed to wring the maximum diagnostic value out of **one** moderate-scale
-``gpu_requeue`` slot on Cannon (A100 40/80 GB, or a MIG slice). jht's GPU numbers
+``gpu_requeue`` slot (A100 40/80 GB, or a MIG slice). jht's GPU numbers
 have so far been entirely *deferred* -- never measured. This run captures, in a
 single job:
 
