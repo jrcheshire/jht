@@ -11,9 +11,9 @@ concurrency:
 
 jobs:
   lint-and-test:
-    name: Lint + typecheck + tests (linux)
+    name: Lint + typecheck + fast tests (linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +30,9 @@ jobs:
       - name: Typecheck
         run: pixi run typecheck
 
-      # The default pixi env pulls the ducc0/healpy oracles, so this is the full
-      # gated parity suite (CPU, float64). The GPU parity gate auto-skips (no device).
-      - name: Test
-        run: pixi run test
+      # The default pixi env pulls the ducc0/healpy oracles, so this is the gated
+      # parity suite (CPU, float64). The GPU parity gate auto-skips (no device). The
+      # heavy off-grid oracle sweeps are marked `slow` and run by nightly.yml instead,
+      # keeping the per-push gate fast; the full suite runs there + pre-release.
+      - name: Test (fast gate -- `not slow`)
+        run: pixi run test-fast

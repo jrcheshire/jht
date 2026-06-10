@@ -84,7 +84,8 @@ ruff = "*"
 mypy = "*"
 
 [tool.pixi.tasks]
-test = "pytest"
+test = "pytest"                       # full suite (local default + nightly + pre-release)
+test-fast = "pytest -m 'not slow'"    # the per-push CI gate (skips the heavy oracle sweeps)
 lint = "ruff check"
 format = "ruff format"
 typecheck = "mypy src/jht"
@@ -116,3 +117,11 @@ line-length = 100
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+# Heavy oracle/sweep tests are marked `slow` and excluded from the fast per-push CI
+# gate (`pixi run test-fast`); the full suite (`pixi run test`) + the nightly workflow
+# still run them, so no coverage is lost -- only rescheduled.
+markers = [
+  "slow: heavy oracle / sweep test; run by the full suite + nightly, not the fast gate",
+]

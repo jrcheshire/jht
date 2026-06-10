@@ -1,0 +1,26 @@
+name: nightly (full suite)
+
+# The full gated suite, including the `slow` off-grid oracle/analytic-derivative
+# sweeps that the per-push `test.yml` skips. Runs on a schedule and on demand --
+# so per-push CI stays fast while every test still runs daily (and before a release,
+# locally or via the manual dispatch).
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  full-suite:
+    name: Full suite incl. slow (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.10
+        with:
+          locked: true
+          cache: true
+
+      - name: Test (full -- incl. `slow`)
+        run: pixi run test

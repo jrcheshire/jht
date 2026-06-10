@@ -27,6 +27,11 @@ from jht._recursion import normalized_legendre, spin_weighted_lambda  # noqa: E4
 from jht.healpix import alm_column_base, alm_metric_weight, alm_size  # noqa: E402
 from jht.offgrid import adjoint_synthesis_general, synthesis_general  # noqa: E402
 
+# The off-grid suite is the heaviest in the project (~60% of total wall time -- direct-sum
+# and ducc oracles + analytic pointing-derivative checks, spin 0-3). Mark the whole module
+# `slow` so it runs in the full suite (`pixi run test`) + nightly, not the fast per-push gate.
+pytestmark = pytest.mark.slow
+
 FWD_TOL = 1e-9  # a-priori off-grid tier (epsilon=1e-10 + headroom); see ROADMAP Phase 4
 ADJ_TOL = 1e-12  # algebraic adjoint identity (epsilon-independent)
 BRIDGE_TOL = 1e-12  # native VJP == G * conj(adjoint)
