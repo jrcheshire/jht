@@ -1,12 +1,12 @@
 #!/bin/bash
 # Cannon SLURM submission to CONFIRM the real on-grid transform at nside=2048 (item 2).
-# The compile-characterization probe (compile2048_20633198) showed the ring assembly
-# compiles in ~7 min with 64G host RAM and runs ~0.1s -- so the earlier "ptxas-FAIL" was
-# host-RAM OOM during compile, not a defect.  This run confirms the END-TO-END public
-# transform (jht.synthesis + jht.map2alm, the recursion ON TOP of the assembly) compiles,
-# runs, and matches CPU to ~1e-12 at nside=2048 -- the basis for documenting the resource
-# requirement and clearing the release-blocker.  Parity-only (the vmap timing leg OOMs at
-# nside=2048 batch=8); generous 64G / 90 min for the several ~7-8 min GPU compiles.
+# The combined-gather ring assembly (commit 83993fa) FIXED the nside=2048 compile: the
+# old per-group scatter ptxas-FAILed, the gather's jit_synth compiles and synth runs at
+# nside=2048 (verified -- ran even on a 5 GB MIG; only map2alm OOMed there at runtime for
+# lack of device memory).  This run confirms the END-TO-END public transform (jht.synthesis
+# + jht.map2alm) matches CPU to ~1e-12 at nside=2048 on a slice big enough to hold both --
+# the basis for documenting the (compile + ~13 GB runtime) requirement and clearing the
+# release-blocker.  Parity-only (the vmap timing leg OOMs at nside=2048 batch=8).
 #
 # Pre-install once (see submit_gpu_diagnostic.sh): CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
 #
@@ -14,16 +14,20 @@
 #     cd ~/jht && sbatch scripts/submit_confirm_2048.sh
 #
 # Output -> runs/gpu-diag/confirm2048_<jobid>.{out,err} (copy the .out back to analyze).
-# NOTE: needs a >=24 GB GPU slice (nside=2048 on-grid peak ~11-13 GB); a small MIG will OOM.
 
+# Slice: request a specific 20 GB A100 MIG on the gpu_test partition (guaranteed size,
+# vs gpu_requeue's random 5/10/20 GB) -- see FASRC docs "Using GPUs".  20 GB holds the
+# nside=2048 synth AND map2alm at runtime (a 5 GB MIG OOMed map2alm).  gpu_test caps each
+# MIG at <64 GB RAM / <8 CPUs and 12 h, so --mem=60G / -c 4 stay under the limit (the
+# gather'd synth compiles well under 60 G host RAM).  (Drop --account if it is rejected
+# on gpu_test; it only sets fairshare.)
 #SBATCH --job-name=jht-confirm-2048
 #SBATCH --account=kovac_lab
-#SBATCH --partition=gpu_requeue
-#SBATCH --gres=gpu:1
-#SBATCH --time=01:30:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=8
-#SBATCH --requeue
+#SBATCH --partition=gpu_test
+#SBATCH --gres=gpu:nvidia_a100_3g.20gb:1
+#SBATCH --time=02:00:00
+#SBATCH --mem=60G
+#SBATCH --cpus-per-task=4
 #SBATCH --open-mode=append
 #SBATCH --output=runs/gpu-diag/confirm2048_%j.out
 #SBATCH --error=runs/gpu-diag/confirm2048_%j.err
