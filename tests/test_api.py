@@ -16,7 +16,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 import jht  # noqa: E402
-from jht import _analysis, diff, healpix, masked, offgrid, weights  # noqa: E402
+from jht import _analysis, _cache, diff, healpix, masked, offgrid, weights  # noqa: E402
 
 EXPECTED = {
     "synthesis", "adjoint_synthesis", "analysis", "map2alm", "bare_analysis",
@@ -27,6 +27,7 @@ EXPECTED = {
     "synthesis_general_real", "adjoint_synthesis_general_real",
     "bandpower",
     "alm_to_real", "real_to_alm", "n_dof", "alm_size", "alm_metric_weight",
+    "enable_compilation_cache",
 }
 
 
@@ -65,6 +66,21 @@ def test_reexports_are_the_real_objects():
     assert jht.synthesis_general_real is diff.synthesis_general_real
     assert jht.adjoint_synthesis_general_real is diff.adjoint_synthesis_general_real
     assert jht.bandpower is diff.bandpower
+    assert jht.enable_compilation_cache is _cache.enable_compilation_cache
+
+
+def test_enable_compilation_cache_sets_config(tmp_path):
+    """The opt-in helper flips the JAX persistent-cache config (keys can move across
+    jax versions, so pin them); save/restore so it does not leak to other tests."""
+    saved_dir = jax.config.jax_compilation_cache_dir
+    saved_secs = jax.config.jax_persistent_cache_min_compile_time_secs
+    try:
+        jht.enable_compilation_cache(str(tmp_path), min_compile_time_secs=2.5)
+        assert jax.config.jax_compilation_cache_dir == str(tmp_path)
+        assert jax.config.jax_persistent_cache_min_compile_time_secs == 2.5
+    finally:
+        jax.config.update("jax_compilation_cache_dir", saved_dir)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", saved_secs)
 
 
 def test_top_level_roundtrip():

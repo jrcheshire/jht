@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`enable_compilation_cache(dir)`** — opt in to JAX's persistent on-disk
+  compilation cache. The nside≥1024 on-grid compile is multi-minute and structural
+  (~458 s at nside=2048, ~93% the per-ring-length FFT unroll); the cache makes it
+  pay-once-ever rather than per run. Consumer-opted-in (like x64); numerics untouched.
+  Measured table in `docs/performance.md`.
 - **Off-grid real-DOF layer** — `synthesis_general_real` (`S_g ∘ T⁻¹`) and
   `adjoint_synthesis_general_real` (`T ∘ S_gᵀ`): the arbitrary-pointing duals of
   `synthesis_real`, a plain real-linear `ℝⁿ→ℝᵐ` over spin 0–3 (`jacfwd ≡ jacrev`,

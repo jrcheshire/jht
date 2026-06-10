@@ -203,8 +203,12 @@ GPU) closed both items that were open at 2026-06-08. Both reworks are **bit-iden
   length-N HEALPix ring needs an exact length-N FFT, so they can't be padded to a common
   length) shrinks the module enough to compile. Measured at nside=2048, lmax=1000 on a
   20 GB A100 MIG: synth and `map2alm` **compile, run, and match CPU to ~1e-13** (synth
-  4.4e-13 / 1.4e-14 spin-0; 3.1e-13 / 2.0e-14 spin-2). Runtime fits in a ~20 GB slice;
-  the one-time compile is multi-minute (jit-cached).
+  4.4e-13 / 1.4e-14 spin-0; 3.1e-13 / 2.0e-14 spin-2). Runtime fits in a ~20 GB slice.
+  The first compile is multi-minute and structural — ~458 s at nside=2048, **93% the
+  per-length FFT unroll** (`n_groups` = nside distinct FFT kernels; the recursion is
+  ~1.6 s). It can't be cheaply shrunk, but `jht.enable_compilation_cache(dir)` opts in
+  to JAX's persistent on-disk cache so it is paid **once ever**, not per run — see
+  `docs/performance.md` "Compile time".
 
 ## Open / to settle on Cannon
 

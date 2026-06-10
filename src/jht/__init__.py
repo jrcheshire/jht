@@ -30,6 +30,7 @@ See ``README.md`` for the tour, ``docs/consumers.md`` for the downstream seam
 from __future__ import annotations
 
 from ._analysis import analysis, bare_analysis, map2alm
+from ._cache import enable_compilation_cache
 from .diff import (
     adjoint_synthesis_general_real,
     analysis_real,
@@ -92,4 +93,6 @@ __all__ = [
     # a_lm layout / inner-product helpers
     "alm_size",
     "alm_metric_weight",  # the (2 - delta_m0) metric G (the bk-jax 2*conj bridge)
+    # compile-latency: opt in to JAX's persistent on-disk compilation cache
+    "enable_compilation_cache",
 ]

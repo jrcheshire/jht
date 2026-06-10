@@ -143,3 +143,42 @@ Method and full numbers in `docs/gpu.md`. Headline (Cannon A100 MIG / V100, fp64
 Every fix here is the same lesson — **fp64/complex `at[idx].set` scatters are
 catastrophic on GPU; use a gather** — and each is bit-identical (gated by the full
 CPU suite + GPU==CPU parity).
+
+## Compile time (nside ≥ 1024) — and the persistent cache
+
+The combined-gather de-unroll fixed the nside=2048 *compile failure*, but the first
+compile is still **multi-minute**, and that cost is structural. The on-grid `synth`
+loops over the distinct HEALPix ring lengths (caps 4, 8, …, 4·nside; the equatorial
+belt is one batched group), so it compiles **one ifft kernel per distinct length =
+`n_groups` = nside** of them. Measured first-compile (GPU A100 MIG, fp64,
+`scripts/profile_compile_time.py`), split into the recursion vs the FFT-unroll
+assembly:
+
+| nside | n_groups | synth compile | of which FFT-unroll | recursion | synth run |
+|------:|---------:|--------------:|--------------------:|----------:|----------:|
+| 256   | 256      | 46 s          | 26 s (57%)          | 0.4 s     | 29 ms     |
+| 512   | 512      | 70 s          | 63 s (89%)          | 0.7 s     | 173 ms    |
+| 1024  | 1024     | 168 s         | 154 s (92%)         | 1.1 s     | 442 ms    |
+| 2048  | 2048     | **458 s**     | **425 s (93%)**     | 1.6 s     | 881 ms    |
+
+The FFT-unroll assembly is ~93% of the compile at nside=2048 and scales
+super-linearly (the kernel *count* ∝ nside and each kernel's length grows too); the
+recursion compiles in ~1.6 s. (At *runtime* the inversion holds — the recursion
+dominates, the many tiny FFTs are cheap to run.) The unroll is unavoidable: distinct
+static FFT lengths cannot be batched, and padding to a common length is numerically
+invalid (a length-N ring needs an exact length-N FFT).
+
+So the lever is not to shrink the compile but to make it **pay-once-ever** — opt in to
+JAX's persistent on-disk compilation cache, which jht exposes as a one-liner (it flips
+global JAX config, so, like x64, the entry point opts in and the library never does):
+
+```python
+import jht
+jht.enable_compilation_cache("~/.cache/jht-xla")   # before the first transform compiles
+```
+
+The first nside≥1024 compile is then written to disk and reused by every later process
+(keyed by jaxlib version + accelerator + the program); numerics are untouched. A
+genuine *structural* reduction (e.g. Bluestein at a common power-of-2 length to
+collapse the per-length FFTs into a handful — exact, but more runtime FLOPs and its
+own validation) is a possible future lever, not yet implemented.
