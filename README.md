@@ -11,7 +11,7 @@ It exists to serve the GPU / differentiable tier of analysis that a CPU-only C++
 transform (ducc0) structurally cannot, while *owning the numerics*. See
 [`docs/motivation.md`](docs/motivation.md) for the full decision record.
 
-## Status (2026-06-07)
+## Status (2026-06-10)
 
 Phases 0–4 **complete and validated** (190 tests pass + 8 GPU-gated skips,
 CPU/float64):
@@ -33,10 +33,10 @@ CPU/float64):
 - **Differentiability** — native JAX autodiff (`jacfwd ≡ jacrev`, tight adjoint
   identity), plus a convention-clean real-DOF layer `jht.diff`; see
   [`docs/design.md`](docs/design.md) §Differentiability.
-- **GPU** — pure JAX, so the transforms run on CUDA with no code change; a locked
-  CUDA env (`pixi … -e gpu`) plus parity (`scripts/gpu_check.py`) and single-slot
-  diagnostic (`scripts/gpu_diagnostic.py`) harnesses are in place. The *measured*
-  GPU run is deferred to an NVIDIA box (Cannon); see [`docs/gpu.md`](docs/gpu.md).
+- **GPU** — pure JAX, so the transforms run on CUDA with no code change. Measured on
+  Cannon A100/V100 (fp64): GPU==CPU parity ~1e-13 across the BK regime **including
+  nside=2048**, forward synthesis 14–60× the CPU. See **Performance** below and
+  [`docs/gpu.md`](docs/gpu.md).
 
 ## Install
 
@@ -98,6 +98,17 @@ inputs. It is **not** a drop-in for ducc's purity-critical (~1e-4 E→B-leakage)
 production path. Tolerances are a-priori and gate-driven, never relaxed without
 sign-off. Residual mismatches are logged in
 [`DISCREPANCIES.md`](DISCREPANCIES.md).
+
+## Performance
+
+Pure JAX runs unchanged on CUDA. Measured on Cannon A100 (incl. a 20 GB MIG) / V100, fp64:
+
+- **GPU==CPU parity ~1e-13** across the BK regime, **including nside=2048** (synthesis and `map2alm`).
+- **Forward synthesis 14–60×** the 8-core CPU; fp64/fp32 ≈ 2.2×.
+- **Off-grid forward** ~0.5–0.9 s at ℓ_max=1000 (independent of the number of points; recursion-bound), with the pointing gradient ~1× a forward.
+- **nside=2048** compiles and runs on GPU — a ~20 GB slice holds synthesis + `map2alm`; the one-time compile is multi-minute (jit-cached).
+
+The recurring GPU lesson: fp64/complex scatters are catastrophic on GPU, so jht packs and assembles via **gathers**. CPU perf model + memory in [`docs/performance.md`](docs/performance.md); GPU detail in [`docs/gpu.md`](docs/gpu.md).
 
 ## Using jht as a dependency
 
