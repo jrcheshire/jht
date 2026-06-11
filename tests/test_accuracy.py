@@ -26,7 +26,10 @@ from jht.healpix import alm_size, synthesis  # noqa: E402
 
 GATE_A = 1e-4  # a-priori committed contract (weighted + niter=3)
 DEEP_FLOOR = 1e-9  # weighted+iter actually converges far below the contract
-MATRIX = [(32, 32), (64, 64), (128, 128), (256, 256)]
+# lmax = nside rows sit at the deep ~1e-13 floor; the (64, 96) band-ceiling row
+# measures ~5e-7 (quadrature products exceed the weights' exactness degree above
+# lmax = nside -- see docs/accuracy.md) and gates the contract there too.
+MATRIX = [(32, 32), (64, 64), (128, 128), (256, 256), (64, 96)]
 
 
 def _lvals(lmax: int) -> np.ndarray:

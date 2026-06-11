@@ -25,11 +25,16 @@ well-conditioned system here:
     minimize ||w||  s.t.  sum_rings c_i n_i (1 + w_i) P_l(x_i) = Npix * delta_{l0}
     for even l = 0, 2, ..., Lw,   with Lw = 2*nside.
 
-``Lw = 2*nside`` makes the m=0 quadrature exact across the whole usable band
-(transforms are capped at ``lmax <= 1.5*nside``), which is what lets the iteration
-reach machine precision; pushing ``Lw`` to the fully-determined ``4*nside-2`` is
-Vandermonde-ill-conditioned and was rejected.  The minimum-norm (least-squares)
-solution regularizes the remaining out-of-band freedom.  Validated **end to end**
+``Lw = 2*nside`` makes the m=0 quadrature exact for Legendre polynomials to
+degree ``2*nside`` -- which covers the analysis *products* ``lambda_l0
+lambda_l'0`` (degree ``l + l' <= 2*lmax``) in full only for ``lmax <= nside``.
+Between ``nside`` and the ``lmax <= 1.5*nside`` ceiling the residual quadrature
+error grows: the weighted ``niter=3`` round-trip is ~1e-13 at ``lmax = nside``
+but ~5e-7 at the ceiling (still well inside the 1e-4 contract; more iterations
+recover machine precision -- see ``docs/accuracy.md``).  Pushing ``Lw`` to the
+fully-determined ``4*nside-2`` is Vandermonde-ill-conditioned and was rejected.
+The minimum-norm (least-squares) solution regularizes the remaining out-of-band
+freedom.  Validated **end to end**
 (weighted round-trip accuracy matches ``healpy.map2alm(use_weights=True)``; see
 ``docs/accuracy.md``), not by matching HEALPix's weight array.
 

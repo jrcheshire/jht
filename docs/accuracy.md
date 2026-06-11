@@ -15,7 +15,8 @@ synthesized to a map and recovered with `analysis`; the error is the max-abs
 difference from the known input a_lm.
 
 - **Committed gate:** weighted + `niter=3` round-trip ≤ **1e-4**, across
-  nside ∈ {32,64,128,256}, spin ∈ {0,2}. (`tests/test_accuracy.py`, Gate A.)
+  nside ∈ {32,64,128,256} at `lmax = nside`, plus a band-ceiling row
+  (`nside=64, lmax=96`), spin ∈ {0,2}. (`tests/test_accuracy.py`, Gate A.)
 - **Measured:** ~**1e-13** (≈9 orders of headroom) — machine precision, matching
   `healpy.map2alm(use_weights=True, iter=3)`. The gate is held at the a-priori
   1e-4 (not tightened to one machine's float64 floor; the headroom is documented
@@ -67,11 +68,14 @@ conditioned system in numpy (once per nside, cached, off the JAX hot path):
   (`RingInfo.z[:2·nside]`), the same half-grid the recursion runs on; multiplicity
   `c_i = 2` (N/S pair) except `c = 1` for the equatorial ring → exactly `2·nside`
   weights. `P_ℓ` via `numpy.polynomial.legendre.legvander`.
-- `Lw = 2·nside` makes the m=0 quadrature exact across the whole usable band
-  (`lmax ≤ 1.5·nside`), which is what lets the iteration reach machine precision.
-  The fully-determined system (`Lw = 4·nside−2`) is Vandermonde-ill-conditioned
-  and was rejected; the minimum-norm (`lstsq`) solution regularizes the remaining
-  out-of-band freedom.
+- `Lw = 2·nside` makes the m=0 quadrature exact for Legendre polynomials to
+  degree `2·nside`. The analysis integrals involve *products* `λ_ℓ0 λ_ℓ'0` of
+  degree up to `2·lmax`, so the quadrature is fully exact only for
+  `lmax ≤ nside` — which is where the deep ~1e-13 floor in the table above is
+  measured. Above `nside` the residual error grows (see "Behavior toward the
+  band ceiling" below). The fully-determined system (`Lw = 4·nside−2`) is
+  Vandermonde-ill-conditioned and was rejected; the minimum-norm (`lstsq`)
+  solution regularizes the remaining out-of-band freedom.
 - **Convention:** the stored `w_i` is the deviation from 1 (matching HEALPix's
   file convention); `T == Q == U`, so one array serves both spins.
 
@@ -80,6 +84,30 @@ to `Lw` (≤1e-9, to nside=512) plus `Σ W_pix = 4π` — in `tests/test_weights
 and on **end-to-end accuracy** (the table above) in `tests/test_accuracy.py`. They
 are *not* gated against HEALPix's weight array (a different solver; the
 end-to-end performance is what matches).
+
+## Behavior toward the band ceiling (lmax > nside)
+
+The deep ~1e-13 floor above is a property of the `lmax ≈ nside` regime, where
+the ring weights make the colatitude quadrature exact for the full set of
+analysis products. Toward the `lmax ≤ 1.5·nside` ceiling the default `niter=3`
+floor rises (the contract still holds with ~2 orders of headroom), and more
+iterations recover machine precision — the degradation is a convergence-rate
+effect, not a floor:
+
+| nside | lmax | spin | weighted niter=3 | weighted niter=8 |
+|---:|---:|---:|---:|---:|
+| 32 | 32 (= nside)    | 0/2 | 1.1e-12 / 5.0e-13 | 4.4e-16 / 5.2e-16 |
+| 32 | 40 (1.25·nside) | 0/2 | 2.6e-8 / 2.2e-8   | 5.1e-16 / 6.3e-16 |
+| 32 | 48 (1.5·nside)  | 0/2 | 8.4e-7 / 7.8e-7   | 2.6e-14 / 3.0e-14 |
+| 64 | 64 (= nside)    | 0/2 | 2.1e-13 / 2.9e-13 | 6.3e-16 / 8.3e-16 |
+| 64 | 80 (1.25·nside) | 0/2 | 2.4e-8 / 7.5e-9   | 7.8e-16 / 9.2e-16 |
+| 64 | 96 (1.5·nside)  | 0/2 | 4.0e-7 / 5.0e-7   | 1.3e-14 / 1.8e-14 |
+
+The contract gate matrix (`tests/test_accuracy.py`) includes a ceiling row
+(`nside=64, lmax=96`) at the committed 1e-4. If you need machine precision at
+`lmax > nside`, raise `niter` (8 suffices through the ceiling). The transforms
+warn (once per geometry) if called *above* the `1.5·nside` ceiling, where
+accuracy is unvalidated.
 
 ## Iteration
 

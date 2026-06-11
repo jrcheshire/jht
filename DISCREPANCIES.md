@@ -4,6 +4,21 @@ Residual numeric mismatches and known-limitation notes, with their cause — log
 rather than buried as TODOs (mirroring bk-jax discipline). Each entry says
 whether it is a *defect* (to fix) or an *expected property* (to document).
 
+## Weighted analysis floor rises toward the band ceiling (expected, not a defect)
+
+The headline weighted + `niter=3` round-trip ~1e-13 is measured at `lmax ≈ nside`.
+The ring weights (`Lw = 2·nside`) make the m=0 quadrature exact for the analysis
+products `λ_ℓ0 λ_ℓ'0` only up to `lmax = nside`; between there and the
+`lmax ≤ 1.5·nside` ceiling the `niter=3` floor rises to ~5e-7 (measured; the
+committed 1e-4 contract still holds with ~2 orders of headroom).
+
+- **Status:** expected property of the quadrature degree, **not** a transform
+  defect — `niter=8` recovers ~1e-14 at the ceiling (convergence-rate effect,
+  not a floor). Measured table + gate row (`nside=64, lmax=96`) in
+  `docs/accuracy.md` / `tests/test_accuracy.py`.
+- **Mitigation:** raise `niter` for `lmax > nside`; the transforms warn (once per
+  geometry) above the `1.5·nside` ceiling, where accuracy is unvalidated.
+
 ## Spin-2 cut-sky recovery — E/B ambiguous modes (expected, not a defect)
 
 `jht.masked.deconvolve` recovers the true a_lm from a cut sky only where the cut

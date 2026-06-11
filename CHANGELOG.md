@@ -6,7 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`constrained_realization` with zero-power multipoles** (e.g. `Cl[0:2] = 0`,
+  the standard zeroed monopole/dipole) returned garbage for the *physical* modes:
+  the old `1/Cl → 1e30` prior injected ~1e15-scale noise into the CG RHS, so the
+  relative-residual stopping rule fired before the physical modes were solved
+  (measured relative error ~1 vs the dense solve; ~3e-9 with all-positive Cl).
+  `wiener` and `constrained_realization` now solve in **prior-whitened**
+  coordinates (`P = diag(√Cl)`, operator `P·A_x·P + I`): zero-power modes are
+  pinned to 0 exactly, no `1/Cl` scale ever enters the system, and the operator
+  is much better conditioned (eigenvalues ≥ 1). Same math, same posterior;
+  regression-gated with zero-Cl spectra in `tests/test_wiener.py`.
+- **Off-grid pointing gradients at grid-aligned points** — `jax.grad` of
+  `synthesis_general` w.r.t. `loc` returned `±inf` whenever θ or φ landed exactly
+  on an oversampled-grid node (θ ∈ {0, π}, φ = 0, …): the ES-kernel support
+  boundary has an infinite `sqrt` derivative. The kernel now excludes the
+  boundary with a double-`where` guard (value change ≤ e^(−β), below every
+  kernel tier); gradients are finite everywhere. Regression-gated in
+  `tests/test_diff_offgrid.py`.
+
+### Added
+- **Input validation** — `synthesis` / `adjoint_synthesis` /
+  `synthesis_general` / `adjoint_synthesis_general` now raise `ValueError` on
+  wrong-shape `alm` / map / `field` / `loc` (previously silently clamped by the
+  gather → silently wrong results), and `adjoint_synthesis_general` rejects
+  complex fields. `wiener` / `constrained_realization` validate the `signal_cl`
+  length.
+- **Warnings** — the on-grid transforms warn once per geometry when
+  `lmax > 1.5·nside` (the documented design ceiling, previously unenforced), and
+  all transforms warn when `jax_enable_x64` is off (silent float32 execution).
+
 ### Changed
+- **Accuracy docs** — corrected the ring-weight exactness claim: `Lw = 2·nside`
+  covers the analysis quadrature products in full only for `lmax ≤ nside`, not
+  the whole `1.5·nside` band. Added the measured band-ceiling table (weighted
+  `niter=3`: ~1e-13 at `lmax = nside` → ~5e-7 at `lmax = 1.5·nside`; `niter=8`
+  recovers ~1e-14) to `docs/accuracy.md`, a band-ceiling row (`nside=64,
+  lmax=96`) to the accuracy gate, and a `DISCREPANCIES.md` entry.
 - **Docs** — rewrote `docs/` for a public audience: removed consumer-specific
   (BICEP/Keck, bk-jax) and development-process references, trimmed `motivation.md`
   to a concise justification, and de-jargoned (e.g. MUSE → field-level inference).
