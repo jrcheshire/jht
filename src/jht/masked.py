@@ -33,7 +33,13 @@ in ``[0,1]``):
    the x-space below is the *exact* diagonal ``D = diag(1/Cl)``.  The prior bounds
    the near-null / E-B ambiguous modes that the reg=0 deconvolution amplifies (a
    bias-for-variance trade), and :func:`constrained_realization` draws posterior
-   samples for the full MUSE gradient.
+   samples for the full MUSE gradient.  Both run CG in **prior-whitened**
+   coordinates ``y = P^-1 x``, ``P = diag(sqrt(Cl))``: the operator becomes
+   ``P A_x P + I`` (eigenvalues >= 1, well conditioned), and zero-power
+   multipoles (``Cl = 0``, e.g. monopole/dipole) have ``P = 0`` exactly -- they
+   are pinned to 0 rather than carried as a huge finite ``1/Cl``, which would
+   otherwise wreck the CG relative-residual stopping rule through the sampler's
+   ``sqrt(1/Cl)``-scaled noise source.
 
 The inner-product subtlety (the bk-jax ``2*conj`` gotcha): ``S``/``S^T`` are
 adjoint in the ``(2 - delta_{m0})``-weighted a_lm inner product, not the
@@ -63,7 +69,6 @@ from .healpix import adjoint_synthesis, alm_size, synthesis
 from .weights import pixel_weights
 
 _SQRT2 = float(np.sqrt(2.0))
-_BIG = 1.0e30  # 1/Cl for zero-power modes: an (effectively infinite) prior that pins them to 0
 
 
 # --------------------------------------------------------------------------- #
@@ -166,7 +171,7 @@ def real_to_alm(x, lmax: int, spin: int = 0) -> jax.Array:
 
 
 # --------------------------------------------------------------------------- #
-# Cl signal prior as the x-space diagonal  D = T C^-1 T^-1 = diag(1/Cl)
+# Cl signal prior: the x-space whitening  P = T C^1/2 T^-1 = diag(sqrt(Cl))
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=None)
 def _prior_ell_index(lmax: int, spin: int) -> jax.Array:
@@ -186,20 +191,29 @@ def _prior_ell_index(lmax: int, spin: int) -> jax.Array:
     return jnp.asarray(np.concatenate([l_m0, l_mpos, l_mpos]))
 
 
-def _prior_diag(signal_cl, lmax: int, spin: int) -> jax.Array:
-    """x-space prior diagonal ``D = diag(1/Cl)`` (length :func:`n_dof`).
+def _prior_sqrt(signal_cl, lmax: int, spin: int) -> jax.Array:
+    """x-space prior whitening ``pw = sqrt(Cl)`` per DOF (length :func:`n_dof`).
 
     ``signal_cl`` is the signal power spectrum: a ``(lmax+1,)`` array for spin 0, or
     ``(C_EE, C_BB)`` (two ``(lmax+1,)`` arrays, the E and B priors) for spin 2.
-    Zero-power multipoles get ``1/Cl = _BIG`` (a numerically-safe infinite prior
-    pinning them to 0); the reciprocal is guarded so it is grad-safe.
+    ``P = diag(pw)`` is the change of variables ``x = P y`` that turns the prior
+    ``C^-1`` into the identity.  Zero-power multipoles get ``pw = 0`` *exactly* --
+    the infinite-prior limit handled by exclusion, not by a large finite ``1/Cl``
+    (which would pollute the CG stopping rule, catastrophically so through the
+    constrained-realization noise source).  The sqrt is guarded so it is grad-safe
+    in ``Cl``.
     """
     ell = _prior_ell_index(lmax, spin)
 
     def one(cl) -> jax.Array:
-        clv = jnp.asarray(cl)[ell]
+        clv = jnp.asarray(cl)
+        if clv.shape != (lmax + 1,):
+            raise ValueError(
+                f"signal_cl channel must have shape (lmax+1,) = ({lmax + 1},), got {clv.shape}"
+            )
+        clv = clv[ell]
         pos = clv > 0
-        return jnp.where(pos, 1.0 / jnp.where(pos, clv, 1.0), _BIG)
+        return jnp.where(pos, jnp.sqrt(jnp.where(pos, clv, 1.0)), 0.0)
 
     if spin == 0:
         return one(signal_cl)
@@ -214,13 +228,36 @@ def _normal_op(x, w_pix, d_diag, nside: int, lmax: int, spin: int) -> jax.Array:
     """``(A_x + D) x = T S^T diag(w) S T^-1 x + D x`` -- real-symmetric-PD in ``x``.
 
     ``w_pix`` is the per-pixel weight (``N^-1`` or ``M W``, broadcastable to the
-    map); ``d_diag`` is the added diagonal -- a scalar Tikhonov ``reg`` or the
-    x-space Cl-prior ``diag(1/Cl)`` (:func:`_prior_diag`).
+    map); ``d_diag`` is the added scalar Tikhonov ``reg`` (the :func:`deconvolve`
+    path; the Cl-prior solves use the whitened :func:`_whitened_op` instead).
     """
     a = real_to_alm(x, lmax, spin)
     wmp = w_pix * synthesis(a, nside, lmax, spin)
     ax = alm_to_real(adjoint_synthesis(wmp, nside, lmax, spin), lmax, spin)
     return ax + d_diag * x
+
+
+def _whitened_op(y, w_pix, pw, nside: int, lmax: int, spin: int) -> jax.Array:
+    """``(P A_x P + I) y`` with ``P = diag(pw)`` -- the prior-whitened normal operator.
+
+    The substitution ``x = P y`` turns ``(A_x + diag(1/Cl)) x = b`` into
+    ``(P A_x P + I) y = P b``: ``P diag(1/Cl) P = I`` on the physical (``Cl > 0``)
+    modes, and on zero-power modes (``pw = 0``) the operator is the identity, so
+    the zeroed RHS pins them to ``y = 0`` (hence ``x = P y = 0``) *exactly*.
+    Eigenvalues are ``>= 1``, so CG is well conditioned and the relative-residual
+    stopping rule is meaningful for every mode -- no ``1/Cl -> inf`` scale ever
+    enters the system.
+    """
+    a = real_to_alm(pw * y, lmax, spin)
+    wmp = w_pix * synthesis(a, nside, lmax, spin)
+    ax = alm_to_real(adjoint_synthesis(wmp, nside, lmax, spin), lmax, spin)
+    return pw * ax + y
+
+
+def _whiten_x0(x0, pw, lmax: int, spin: int) -> jax.Array:
+    """Warm-start a_lm -> whitened coordinates ``y0 = P^+ T(x0)`` (0 on pinned modes)."""
+    xv = alm_to_real(x0, lmax, spin)
+    return jnp.where(pw > 0, xv / jnp.where(pw > 0, pw, 1.0), 0.0)
 
 
 def _rhs_x(maps, w_pix, nside: int, lmax: int, spin: int) -> jax.Array:
@@ -292,11 +329,14 @@ def wiener(
     The noise-aware posterior mean for the data model ``m = S a + n`` with
     per-pixel inverse-noise ``N^-1`` and a diagonal signal prior ``a ~ N(0, C)``,
     ``C_{lm} = Cl``.  In the real-DOF ``x``-space (isometry ``T``) the prior is the
-    *exact* diagonal ``D = diag(1/Cl)``, so this is stock CG on ``(A_x + D) x = b_x``
-    -- the same operator as :func:`deconvolve`, with the scalar ``reg`` replaced by
-    the Cl-informed ``D`` (``deconvolve``'s ``reg`` is the special case
-    ``Cl = 1/reg`` constant).  It is the MUSE inner solve; for a posterior *draw*
-    (constrained realization) see :func:`constrained_realization`.
+    *exact* diagonal ``D = diag(1/Cl)``; the system ``(A_x + D) x = b_x`` is solved
+    by stock CG in **prior-whitened** coordinates ``x = P y``, ``P = diag(sqrt(Cl))``
+    -- i.e. ``(P A_x P + I) y = P b_x`` (:func:`_whitened_op`), which is well
+    conditioned and handles zero-power multipoles (``Cl = 0``) *exactly* (they are
+    pinned to 0, never carried as a huge ``1/Cl``).  Same operator family as
+    :func:`deconvolve` (``reg`` is the special case ``Cl = 1/reg`` constant).  It
+    is the MUSE inner solve; for a posterior *draw* (constrained realization) see
+    :func:`constrained_realization`.
 
     Parameters
     ----------
@@ -313,15 +353,15 @@ def wiener(
     Returns the Wiener-mean a_lm (``(K,)`` spin-0, ``(2,K)`` spin-2).
     """
     w_pix = _weight_pix(nside, spin, inv_noise=inv_noise, mask=mask, use_weights=use_weights)
-    d_diag = _prior_diag(signal_cl, lmax, spin)
-    b_x = _rhs_x(maps, w_pix, nside, lmax, spin)
+    pw = _prior_sqrt(signal_cl, lmax, spin)
+    b_y = pw * _rhs_x(maps, w_pix, nside, lmax, spin)
 
-    def a_op(x: jax.Array) -> jax.Array:
-        return _normal_op(x, w_pix, d_diag, nside, lmax, spin)
+    def a_op(y: jax.Array) -> jax.Array:
+        return _whitened_op(y, w_pix, pw, nside, lmax, spin)
 
-    x_init = None if x0 is None else alm_to_real(x0, lmax, spin)
-    x_sol, _ = cg(a_op, b_x, x0=x_init, tol=tol, maxiter=max_iter)
-    return real_to_alm(x_sol, lmax, spin)
+    y_init = None if x0 is None else _whiten_x0(x0, pw, lmax, spin)
+    y_sol, _ = cg(a_op, b_y, x0=y_init, tol=tol, maxiter=max_iter)
+    return real_to_alm(pw * y_sol, lmax, spin)
 
 
 def constrained_realization(
@@ -341,15 +381,25 @@ def constrained_realization(
 ) -> jax.Array:
     """One posterior draw ``a ~ N(a_wiener, (S^T N^-1 S + C^-1)^-1)`` (a constrained realization).
 
-    Same system as :func:`wiener` but with a stochastic source added to the RHS::
+    Same system as :func:`wiener` -- solved in the same prior-whitened coordinates
+    ``x = P y``, ``P = diag(sqrt(Cl))`` -- with a stochastic source added to the
+    whitened RHS::
 
-        x_sample = (A_x + D)^-1 (b_x + s),   s = T S^T(sqrt(N^-1) w1) + sqrt(D) xi,
+        y_sample = (P A_x P + I)^-1 (P (b_x + s1) + xi_phys),
+        s1 = T S^T(sqrt(N^-1) w1),
 
-    with ``w1 ~ N(0, I)`` in pixel space and ``xi ~ N(0, I)`` in x-space.  Then
-    ``Cov(s) = A_x + D``, so the solve has mean ``a_wiener`` and covariance
-    ``(A_x + D)^-1`` -- the posterior.  (The ``s1`` factorization is exact because
-    ``T S^T`` is the Euclidean transpose of ``S T^-1`` -- the gated operator
-    symmetry.)  ``key`` is a ``jax.random`` PRNG key; one call returns one draw.
+    with ``w1 ~ N(0, I)`` in pixel space and ``xi ~ N(0, I)`` in x-space (masked to
+    the physical ``Cl > 0`` modes -- on pinned modes RHS and source are 0, so the
+    draw is exactly 0 there, the infinite-prior limit).  ``Cov(P s1 + xi_phys) =
+    P A_x P + I_phys``, so ``x = P y`` has mean ``a_wiener`` and covariance
+    ``(A_x + D)^-1`` on the physical modes -- the posterior.  (The ``s1``
+    factorization is exact because ``T S^T`` is the Euclidean transpose of
+    ``S T^-1`` -- the gated operator symmetry.  Whitening also keeps the CG
+    stopping rule meaningful: the unwhitened sampler injected ``sqrt(1/Cl)``-scaled
+    noise into the RHS, which for ``Cl = 0`` multipoles -- e.g. a zeroed
+    monopole/dipole -- inflated ``||b||`` by ~1e15 and made CG return garbage for
+    the physical modes.)  ``key`` is a ``jax.random`` PRNG key; one call returns
+    one draw.
 
     Parameters mirror :func:`wiener`.  Returns a posterior a_lm sample.
 
@@ -363,7 +413,7 @@ def constrained_realization(
        constrained realization.
     """
     w_pix = _weight_pix(nside, spin, inv_noise=inv_noise, mask=mask, use_weights=use_weights)
-    d_diag = _prior_diag(signal_cl, lmax, spin)
+    pw = _prior_sqrt(signal_cl, lmax, spin)
     b_x = _rhs_x(maps, w_pix, nside, lmax, spin)
 
     npix = 12 * nside * nside
@@ -372,12 +422,11 @@ def constrained_realization(
     omega1 = jax.random.normal(k1, omega_shape, dtype=b_x.dtype)
     s1 = alm_to_real(adjoint_synthesis(jnp.sqrt(w_pix) * omega1, nside, lmax, spin), lmax, spin)
     xi = jax.random.normal(k2, (n_dof(lmax, spin),), dtype=b_x.dtype)
-    s2 = jnp.sqrt(d_diag) * xi
-    rhs = b_x + s1 + s2
+    rhs = pw * (b_x + s1) + jnp.where(pw > 0, xi, 0.0)
 
-    def a_op(x: jax.Array) -> jax.Array:
-        return _normal_op(x, w_pix, d_diag, nside, lmax, spin)
+    def a_op(y: jax.Array) -> jax.Array:
+        return _whitened_op(y, w_pix, pw, nside, lmax, spin)
 
-    x_init = None if x0 is None else alm_to_real(x0, lmax, spin)
-    x_sol, _ = cg(a_op, rhs, x0=x_init, tol=tol, maxiter=max_iter)
-    return real_to_alm(x_sol, lmax, spin)
+    y_init = None if x0 is None else _whiten_x0(x0, pw, lmax, spin)
+    y_sol, _ = cg(a_op, rhs, x0=y_init, tol=tol, maxiter=max_iter)
+    return real_to_alm(pw * y_sol, lmax, spin)

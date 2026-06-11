@@ -4,8 +4,11 @@
 The Wiener solve is ``(S^T N^-1 S + C^-1) a = S^T N^-1 m`` with per-pixel
 inverse-noise ``N^-1`` and a diagonal signal prior ``C_{lm} = Cl``.  In the
 real-DOF x-space (isometry ``T``) the prior is the *exact* diagonal
-``D = diag(1/Cl)``, so this is the same operator family as :func:`deconvolve`
-with the scalar ``reg`` replaced by ``D``.  The gate philosophy mirrors
+``D = diag(1/Cl)``; the solve runs in prior-whitened coordinates ``x = P y``,
+``P = diag(sqrt(Cl))`` (operator ``P A_x P + I``), so zero-power multipoles are
+pinned to 0 exactly -- gated here including the zero-Cl regression (the old
+``1/Cl = 1e30`` path broke the CG stopping rule through the sampler's RHS noise
+and returned garbage for the physical modes).  The gate philosophy mirrors
 ``tests/test_masked.py``: **tight, oracle-backed deterministic gates** for the
 operator, the mean, and the limits; the constrained-realization *covariance* is
 checked by Monte Carlo at an **a-priori budgeted** tolerance (k-sigma on the known
@@ -29,7 +32,8 @@ import pytest  # noqa: E402
 
 from jht.healpix import adjoint_synthesis, alm_size, synthesis  # noqa: E402
 from jht.masked import (  # noqa: E402
-    _prior_diag,  # private: gated against an independent numpy reference
+    _prior_sqrt,  # private: gated against an independent numpy reference
+    _whitened_op,  # private: gated against the dense P A P + I
     alm_to_real,
     constrained_realization,
     deconvolve,
@@ -38,7 +42,7 @@ from jht.masked import (  # noqa: E402
     wiener,
 )
 
-PRIOR_TOL = 1e-12  # _prior_diag == independent ref (layout)
+PRIOR_TOL = 1e-12  # _prior_sqrt == independent ref (layout)
 OP_TOL = 1e-10  # operator A_x+D == dense; real-DOF adjoint identity; symmetry
 SOLVE_TOL = 1e-8  # wiener mean == dense solve (CG tol-limited)
 LIMIT_TOL = 1e-7  # wiener(Cl->inf)==deconvolve(reg=0); (Cl=1/reg)==deconvolve(reg)
@@ -93,8 +97,23 @@ def _signal_cl(lmax: int, spin: int):
     return base if spin == 0 else (base, 0.5 * base)
 
 
+def _signal_cl_zero(lmax: int, spin: int):
+    """A spectrum with zero-power modes -- the zero-Cl regression case.
+
+    spin 0: zeroed monopole + dipole (the standard CMB convention).  spin 2: a
+    B-free prior ``C_BB = 0`` (every B DOF pinned; zeroing l<2 alone would touch
+    no DOFs -- those modes are already structurally absent for spin 2).
+    """
+    base = 1.0 / (np.arange(lmax + 1) + 1.0) ** 2 + 1e-3
+    if spin == 0:
+        c = base.copy()
+        c[:2] = 0.0
+        return c
+    return (base, np.zeros(lmax + 1))
+
+
 def _prior_diag_ref(cl, lmax: int, spin: int) -> np.ndarray:
-    """Independent numpy build of the x-space prior diagonal ``diag(1/Cl)``."""
+    """Independent numpy build of the x-space prior diagonal ``diag(1/Cl)`` (positive Cl)."""
     ms, ls = _mvals(lmax), _lvals(lmax)
     active = ls >= abs(spin)
     ell = np.concatenate([ls[active & (ms == 0)], ls[active & (ms > 0)], ls[active & (ms > 0)]])
@@ -102,6 +121,19 @@ def _prior_diag_ref(cl, lmax: int, spin: int) -> np.ndarray:
     def one(c) -> np.ndarray:
         clv = np.asarray(c)[ell]
         return np.where(clv > 0, 1.0 / np.where(clv > 0, clv, 1.0), 1.0e30)
+
+    return one(cl) if spin == 0 else np.concatenate([one(cl[0]), one(cl[1])])
+
+
+def _prior_sqrt_ref(cl, lmax: int, spin: int) -> np.ndarray:
+    """Independent numpy build of the whitening ``pw = sqrt(Cl)`` (0 where Cl <= 0)."""
+    ms, ls = _mvals(lmax), _lvals(lmax)
+    active = ls >= abs(spin)
+    ell = np.concatenate([ls[active & (ms == 0)], ls[active & (ms > 0)], ls[active & (ms > 0)]])
+
+    def one(c) -> np.ndarray:
+        clv = np.asarray(c)[ell]
+        return np.where(clv > 0, np.sqrt(np.maximum(clv, 0.0)), 0.0)
 
     return one(cl) if spin == 0 else np.concatenate([one(cl[0]), one(cl[1])])
 
@@ -135,66 +167,63 @@ def _ninv_flat(ninv: np.ndarray, spin: int) -> np.ndarray:
 # W-prior: the Cl prior maps to the right x-space diagonal
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("spin", [0, 2])
-def test_prior_diag_matches_ref(spin):
-    """``_prior_diag(Cl)`` == the independent ``diag(1/Cl)`` build, in the T layout."""
+def test_prior_sqrt_matches_ref(spin):
+    """``_prior_sqrt(Cl)`` == the independent ``sqrt(Cl)`` build; zero-Cl -> exactly 0."""
     lmax = 10
-    cl = _signal_cl(lmax, spin)
-    cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
-    d = np.asarray(_prior_diag(cl_j, lmax, spin))
-    ref = _prior_diag_ref(cl, lmax, spin)
-    assert d.shape == (n_dof(lmax, spin),)
-    assert np.max(np.abs(d - ref)) <= PRIOR_TOL * (1.0 + np.max(np.abs(ref)))
+    for cl in (_signal_cl(lmax, spin), _signal_cl_zero(lmax, spin)):
+        cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
+        pw = np.asarray(_prior_sqrt(cl_j, lmax, spin))
+        ref = _prior_sqrt_ref(cl, lmax, spin)
+        assert pw.shape == (n_dof(lmax, spin),)
+        assert np.max(np.abs(pw - ref)) <= PRIOR_TOL * (1.0 + np.max(np.abs(ref)))
+        assert np.all(pw[ref == 0.0] == 0.0)  # pinned modes are exact zeros, not tiny
 
 
 # --------------------------------------------------------------------------- #
-# W-operator: A_x + D == dense  S^T diag(N^-1) S + diag(1/Cl);  symmetric; strictly PD
+# W-operator: the whitened  P (S^T diag(N^-1) S) P + I == dense;  symmetric; >= I
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("spin", [0, 2])
 @pytest.mark.parametrize("which", ["binary", "apod"])
-def test_wiener_operator_matches_dense(spin, which):
+def test_whitened_operator_matches_dense(spin, which):
+    """``_whitened_op`` == dense ``P A_x P + I``, for positive AND zero-power Cl."""
     nside, lmax = 8, 8
     mask = _binary_cap(nside, 0.4) if which == "binary" else _apod_cap(nside, 0.4, 0.4)
     ninv = _ninv(nside, mask, seed=1)
-    cl = _signal_cl(lmax, spin)
-    cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
-
     S = _dense_S(nside, lmax, spin)
-    D = _prior_diag_ref(cl, lmax, spin)
-    A_dense = S.T @ (_ninv_flat(ninv, spin)[:, None] * S) + np.diag(D)
-
+    A0 = S.T @ (_ninv_flat(ninv, spin)[:, None] * S)
     nb = _ninv_bcast(ninv, spin)
-    d_diag = np.asarray(_prior_diag(cl_j, lmax, spin))
     rng = np.random.default_rng(0)
-    for _ in range(3):
-        x = rng.standard_normal(n_dof(lmax, spin))
-        a = real_to_alm(jnp.asarray(x), lmax, spin)
-        wmp = nb * synthesis(a, nside, lmax, spin)
-        ax = np.asarray(alm_to_real(adjoint_synthesis(wmp, nside, lmax, spin), lmax, spin)) + d_diag * x
-        ref = A_dense @ x
-        assert np.max(np.abs(ax - ref)) <= OP_TOL * (1.0 + np.max(np.abs(ref)))
+    for cl in (_signal_cl(lmax, spin), _signal_cl_zero(lmax, spin)):
+        cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
+        pw_ref = _prior_sqrt_ref(cl, lmax, spin)
+        A_dense = pw_ref[:, None] * A0 * pw_ref[None, :] + np.eye(pw_ref.size)
+        pw = _prior_sqrt(cl_j, lmax, spin)
+        for _ in range(3):
+            x = rng.standard_normal(n_dof(lmax, spin))
+            got = np.asarray(_whitened_op(jnp.asarray(x), nb, pw, nside, lmax, spin))
+            ref = A_dense @ x
+            assert np.max(np.abs(got - ref)) <= OP_TOL * (1.0 + np.max(np.abs(ref)))
 
 
 @pytest.mark.parametrize("spin", [0, 2])
-def test_wiener_operator_symmetric_and_pd(spin):
-    """A_x + D is symmetric and *strictly* PD (the prior lifts the near-null modes)."""
+def test_whitened_operator_symmetric_and_pd(spin):
+    """``P A_x P + I`` is symmetric and ``>= I`` (eigenvalues >= 1 -- the whitening point)."""
     nside, lmax = 8, 8
     mask = _binary_cap(nside, 0.4)
     ninv = _ninv(nside, mask, seed=2)
-    cl = _signal_cl(lmax, spin)
+    cl = _signal_cl_zero(lmax, spin)  # the harder case: pinned modes present
     cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
     nb = _ninv_bcast(ninv, spin)
-    d_diag = np.asarray(_prior_diag(cl_j, lmax, spin))
+    pw = _prior_sqrt(cl_j, lmax, spin)
 
     def aop(x):
-        a = real_to_alm(jnp.asarray(x), lmax, spin)
-        wmp = nb * synthesis(a, nside, lmax, spin)
-        return np.asarray(alm_to_real(adjoint_synthesis(wmp, nside, lmax, spin), lmax, spin)) + d_diag * x
+        return np.asarray(_whitened_op(jnp.asarray(x), nb, pw, nside, lmax, spin))
 
     rng = np.random.default_rng(3)
     u, v = rng.standard_normal(n_dof(lmax, spin)), rng.standard_normal(n_dof(lmax, spin))
     assert abs(float(u @ aop(v)) - float(v @ aop(u))) <= OP_TOL * (1.0 + abs(float(u @ aop(v))))
-    # strictly PD: x^T(A+D)x >= ||x||^2 / max(Cl) > 0
-    assert float(u @ aop(u)) > 0.0
+    # >= I: x^T (P A P + I) x >= ||x||^2 (A PSD), so CG sees a well-conditioned system
+    assert float(u @ aop(u)) >= (1.0 - 1e-10) * float(u @ u)
 
 
 # --------------------------------------------------------------------------- #
@@ -236,6 +265,79 @@ def test_wiener_mean_matches_dense_solve(spin):
 
     a_w = np.asarray(wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, max_iter=800, tol=1e-12))
     assert np.max(np.abs(a_w - a_dense)) <= SOLVE_TOL * (1.0 + np.max(np.abs(a_dense)))
+
+
+# --------------------------------------------------------------------------- #
+# W-zero-Cl: zero-power multipoles -- the regression the 1/Cl=1e30 path failed
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("spin", [0, 2])
+def test_wiener_zero_cl_matches_dense(spin):
+    """Zero-power Cl: pinned modes come back exactly 0, physical modes == dense solve."""
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=11)
+    cl = _signal_cl_zero(lmax, spin)
+    cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
+
+    a_true = _rand_alm(lmax, spin, 12)
+    m = np.asarray(synthesis(jnp.asarray(a_true), nside, lmax, spin))
+
+    pw = _prior_sqrt_ref(cl, lmax, spin)
+    phys = pw > 0
+    S = _dense_S(nside, lmax, spin)
+    A0 = S.T @ (_ninv_flat(ninv, spin)[:, None] * S)
+    nb = _ninv_bcast(ninv, spin)
+    b = np.asarray(alm_to_real(adjoint_synthesis(nb * jnp.asarray(m), nside, lmax, spin), lmax, spin))
+    # dense reference: the infinite-prior limit = solve the physical block, pin the rest
+    A_pp = A0[np.ix_(phys, phys)] + np.diag(1.0 / pw[phys] ** 2)
+    x_ref = np.linalg.solve(A_pp, b[phys])
+
+    a_w = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, max_iter=800, tol=1e-12)
+    x_w = np.asarray(alm_to_real(a_w, lmax, spin))
+    assert np.max(np.abs(x_w[~phys])) == 0.0  # pinned exactly, not ~b/1e30
+    assert np.max(np.abs(x_w[phys] - x_ref)) <= SOLVE_TOL * (1.0 + np.max(np.abs(x_ref)))
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+def test_constrained_realization_zero_cl_regression(spin):
+    """The zero-Cl posterior draw solves the physical block correctly.
+
+    Regression: the old sampler added ``sqrt(1/Cl) xi ~ 1e15`` to the CG RHS for
+    zero-power multipoles, inflating ``||b||`` so the relative-residual stop fired
+    with the physical modes unsolved (measured rel. err ~1 vs the dense solve).
+    The RHS is replicated here (deterministic given the key) and dense-solved.
+    """
+    nside, lmax = 8, 8
+    npix = 12 * nside**2
+    ninv = np.ones(npix)
+    cl = _signal_cl_zero(lmax, spin)
+    cl_j = jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
+    a_true = _rand_alm(lmax, spin, 13)
+    m = jnp.asarray(np.asarray(synthesis(jnp.asarray(a_true), nside, lmax, spin)))
+    key = jax.random.PRNGKey(7)
+
+    # replicate the sampler's stochastic RHS (same key -> same split -> same draws)
+    nb = _ninv_bcast(ninv, spin)
+    b = np.asarray(alm_to_real(adjoint_synthesis(nb * m, nside, lmax, spin), lmax, spin))
+    k1, k2 = jax.random.split(key)
+    omega_shape = (npix,) if spin == 0 else (2, npix)
+    omega1 = jax.random.normal(k1, omega_shape, dtype=jnp.float64)
+    s1 = np.asarray(alm_to_real(adjoint_synthesis(jnp.sqrt(nb) * omega1, nside, lmax, spin), lmax, spin))
+    xi = np.asarray(jax.random.normal(k2, (n_dof(lmax, spin),), dtype=jnp.float64))
+
+    pw = _prior_sqrt_ref(cl, lmax, spin)
+    phys = pw > 0
+    S = _dense_S(nside, lmax, spin)
+    A0 = S.T @ (_ninv_flat(ninv, spin)[:, None] * S)
+    A_pp = A0[np.ix_(phys, phys)] + np.diag(1.0 / pw[phys] ** 2)
+    x_ref = np.linalg.solve(A_pp, (b + s1)[phys] + xi[phys] / pw[phys])
+
+    a_cr = constrained_realization(
+        m, cl_j, nside, lmax, key, spin=spin, inv_noise=ninv, max_iter=800, tol=1e-12
+    )
+    x_cr = np.asarray(alm_to_real(a_cr, lmax, spin))
+    assert np.max(np.abs(x_cr[~phys])) == 0.0  # pinned modes: deterministically 0
+    assert np.max(np.abs(x_cr[phys] - x_ref)) <= SOLVE_TOL * (1.0 + np.max(np.abs(x_ref)))
 
 
 # --------------------------------------------------------------------------- #
