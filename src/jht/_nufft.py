@@ -67,10 +67,20 @@ def _beta(W: int, sigma: float) -> float:
 
 
 def _es_kernel(t, beta: float, W: int):
-    """ES window ``exp(beta(sqrt(1-(2t/W)^2)-1))``; 0 outside ``|t| <= W/2``."""
+    """ES window ``exp(beta(sqrt(1-(2t/W)^2)-1))``; 0 outside ``|t| < W/2``.
+
+    The support boundary ``|t| = W/2`` is excluded and the sqrt argument is
+    where-guarded: a target exactly on a fine-grid node (theta in {0, pi},
+    phi = 0, ...) puts a stencil point exactly at the boundary, where
+    ``d/dz sqrt(1-z^2)`` is infinite -- with the boundary included, the
+    loc-gradient came back ``inf`` there.  Excluding it changes the value by at
+    most ``psi(W/2) = e^-beta`` (4.6e-15 at W=14; 7.2e-7 at W=6), below every
+    kernel tier in ``_KERNEL_DB``, and keeps native AD finite and exact.
+    """
     z2 = (2.0 * t / W) ** 2
-    val = jnp.exp(beta * (jnp.sqrt(jnp.clip(1.0 - z2, 0.0, 1.0)) - 1.0))
-    return jnp.where(z2 <= 1.0, val, 0.0)
+    inside = z2 < 1.0
+    val = jnp.exp(beta * (jnp.sqrt(jnp.where(inside, 1.0 - z2, 1.0)) - 1.0))
+    return jnp.where(inside, val, 0.0)
 
 
 def _correction(N: int, n: int, W: int, beta: float) -> np.ndarray:
