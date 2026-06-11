@@ -22,15 +22,17 @@ JAX's native autodiff.  spin 0, 1, 2, 3 (the -spin channel carries (-1)^s).
 
 from __future__ import annotations
 
+import warnings
 from functools import lru_cache
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 from ._nufft import NufftPlan, _next_size, nufft2d1, nufft2d2, nufft_plan
 from ._recursion import RecursionPlan, adjoint_contract, build_recursion_plan, synth_contract
-from .healpix import _tri_dense_maps, alm_metric_weight
+from .healpix import _tri_dense_maps, alm_metric_weight, alm_size
 
 TWO_PI = 2.0 * np.pi
 
@@ -58,6 +60,14 @@ class _OffgridPrep(NamedTuple):
 def _prepare(lmax: int, spin: int, epsilon: float) -> _OffgridPrep:
     if spin not in (0, 1, 2, 3):
         raise NotImplementedError(f"spin={spin} unsupported (0, 1, 2, 3)")
+    # lru_cache => warns once per (lmax, spin, epsilon); getattr: the attr is dynamic (mypy)
+    if not getattr(jax.config, "jax_enable_x64", True):
+        warnings.warn(
+            "jht: jax_enable_x64 is OFF -- the off-grid transforms will silently run in "
+            "float32, far below the requested NUFFT epsilon. Enable it before creating "
+            'any array: jax.config.update("jax_enable_x64", True).',
+            stacklevel=2,
+        )
     ntheta_s = _next_size(lmax + 1) + 1  # CC rings on [0, pi], incl. both poles
     theta_cc = np.arange(ntheta_s) * np.pi / (ntheta_s - 1)
     x_cc = np.cos(theta_cc)
@@ -169,7 +179,11 @@ def synthesis_general(alm, loc, *, spin: int = 0, lmax: int, epsilon: float = 1e
         ``(2, alm_size(lmax))`` (E, B) for ``spin=2``.
     loc : real array ``(npts, 2)``
         ``loc[:,0] = theta`` (colatitude in ``[0, pi]``), ``loc[:,1] = phi`` (in
-        ``[0, 2pi)``).
+        ``[0, 2pi)``).  Out-of-range angles are not validated: both coordinates
+        are evaluated on the smooth period-2pi torus extension (theta through the
+        double-Fourier-sphere identity ``F(-theta, phi) = (-1)^spin F(theta,
+        phi + pi)``), so e.g. ``theta = -0.1`` returns the field at the reflected
+        point, not an error.
     spin : int
         ``0`` (temperature) or ``2`` (polarization Q/U).
     lmax : int
@@ -182,8 +196,17 @@ def synthesis_general(alm, loc, *, spin: int = 0, lmax: int, epsilon: float = 1e
     """
     p = _prepare(lmax, spin, epsilon)
     loc = jnp.asarray(loc)
+    if loc.ndim != 2 or loc.shape[-1] != 2:
+        raise ValueError(f"loc must have shape (npts, 2) [theta, phi]; got {loc.shape}")
+    alm = jnp.asarray(alm)
+    expect = (alm_size(lmax),) if spin == 0 else (2, alm_size(lmax))
+    if alm.shape != expect:
+        raise ValueError(
+            f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
+            "(a wrong-size alm would otherwise be silently clamped by the gather)"
+        )
     theta, phi = loc[:, 0], loc[:, 1]
-    field = nufft2d2(p.nplan, _alm_to_Fkm(p, jnp.asarray(alm)), theta, phi)
+    field = nufft2d2(p.nplan, _alm_to_Fkm(p, alm), theta, phi)
     if p.spin == 0:
         return jnp.real(field)
     return jnp.stack([jnp.real(field), jnp.imag(field)])  # (Q, U)
@@ -199,8 +222,19 @@ def adjoint_synthesis_general(field, loc, *, spin: int = 0, lmax: int, epsilon: 
     """
     p = _prepare(lmax, spin, epsilon)
     loc = jnp.asarray(loc)
-    theta, phi = loc[:, 0], loc[:, 1]
+    if loc.ndim != 2 or loc.shape[-1] != 2:
+        raise ValueError(f"loc must have shape (npts, 2) [theta, phi]; got {loc.shape}")
     field = jnp.asarray(field)
+    if jnp.iscomplexobj(field):
+        raise TypeError(
+            "field must be real ((npts,) for spin=0; (2, npts) real Q/U planes for spin>0); "
+            "a complex field would be silently mis-folded"
+        )
+    npts = loc.shape[0]
+    expect = (npts,) if spin == 0 else (2, npts)
+    if field.shape != expect:
+        raise ValueError(f"field shape {field.shape} != expected {expect} for {npts} points")
+    theta, phi = loc[:, 0], loc[:, 1]
     # transpose of the (Re) / (Re, Im) field reduction
     fc = field.astype(jnp.complex128) if p.spin == 0 else (field[0] + 1j * field[1])
     fkm_cot = nufft2d1(p.nplan, fc, theta, phi)

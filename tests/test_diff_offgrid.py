@@ -28,7 +28,7 @@ import pytest  # noqa: E402
 
 from jht.diff import adjoint_synthesis_general_real, synthesis_general_real  # noqa: E402
 from jht.masked import n_dof, real_to_alm  # noqa: E402
-from jht.offgrid import synthesis_general  # noqa: E402
+from jht.offgrid import _prepare, adjoint_synthesis_general, synthesis_general  # noqa: E402
 
 ALG_TOL = 1e-12  # algebraic identities (a-priori; achieves ~1e-15)
 LMAX = 16
@@ -84,3 +84,68 @@ def test_native_vjp_eq_adjoint(spin):
     cot = vjp(v)[0]
     adj = adjoint_synthesis_general_real(v, loc, spin=spin, lmax=LMAX)
     assert float(jnp.max(jnp.abs(cot - adj)) / jnp.max(jnp.abs(adj))) <= ALG_TOL
+
+
+# --------------------------------------------------------------------------- #
+# loc-grad at grid-aligned pointings (regression: the ES-kernel boundary inf)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("spin", [0, 2])
+def test_loc_grad_finite_at_grid_aligned_points(spin):
+    """Pointing gradients stay finite when theta/phi land exactly on fine-grid nodes.
+
+    theta in {0, pi}, phi = 0, and exact CC-ring/azimuth nodes put a stencil point
+    exactly on the ES-kernel support boundary, where the gradient used to be inf
+    (the kernel now excludes the boundary; see ``jht._nufft._es_kernel``).
+    """
+    x = jnp.asarray(_rand_x(spin, 40 + spin))
+    alm = real_to_alm(x, LMAX, spin)
+    p = _prepare(LMAX, spin, 1e-10)
+    th_node = np.pi * 3.0 / (p.ntheta_s - 1)  # an exact CC-ring colatitude
+    ph_node = 2.0 * np.pi * 5.0 / p.nplan.nm  # an exact fine-grid azimuth
+    loc = jnp.asarray(
+        [[0.0, 0.3], [np.pi, 1.0], [1.0, 0.0], [th_node, ph_node], [1.0, 2.0]]
+    )
+
+    def loss(L):
+        return jnp.sum(synthesis_general(alm, L, spin=spin, lmax=LMAX))
+
+    val = synthesis_general(alm, loc, spin=spin, lmax=LMAX)
+    g = jax.grad(loss)(loc)
+    assert np.all(np.isfinite(np.asarray(val)))
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_loc_grad_fd_at_phi_node():
+    """The phi-derivative AT phi=0 (a grid node) matches central finite differences."""
+    x = jnp.asarray(_rand_x(0, 50))
+    alm = real_to_alm(x, LMAX, 0)
+
+    def f(phi):
+        loc = jnp.stack([jnp.full((1,), 1.1), phi[None]], axis=1)
+        return jnp.sum(synthesis_general(alm, loc, spin=0, lmax=LMAX))
+
+    g = float(jax.grad(f)(jnp.asarray(0.0)))
+    h = 1e-5
+    fd = (float(f(jnp.asarray(h))) - float(f(jnp.asarray(-h)))) / (2.0 * h)
+    assert np.isfinite(g)
+    # FD noise floor ~ epsilon/h = 1e-10/1e-5 = 1e-5 absolute; gate with margin
+    assert abs(g - fd) <= 1e-4 * (1.0 + abs(fd))
+
+
+# --------------------------------------------------------------------------- #
+# input validation (regression: silent gather-clamp on wrong-size inputs)
+# --------------------------------------------------------------------------- #
+def test_offgrid_input_validation():
+    x = jnp.asarray(_rand_x(0, 60))
+    alm = real_to_alm(x, LMAX, 0)
+    loc = _rand_loc(10, 700)
+    with pytest.raises(ValueError, match="alm shape"):
+        synthesis_general(jnp.asarray(np.zeros(3, dtype=complex)), loc, spin=0, lmax=LMAX)
+    with pytest.raises(ValueError, match="loc must"):
+        synthesis_general(alm, loc[:, :1], spin=0, lmax=LMAX)
+    with pytest.raises(ValueError, match="field shape"):
+        adjoint_synthesis_general(np.zeros(9), loc, spin=0, lmax=LMAX)
+    with pytest.raises(ValueError, match="field shape"):
+        adjoint_synthesis_general(np.zeros(10), loc, spin=2, lmax=LMAX)  # missing (2, npts)
+    with pytest.raises(TypeError, match="real"):
+        adjoint_synthesis_general(np.zeros(10, dtype=complex), loc, spin=0, lmax=LMAX)

@@ -130,3 +130,27 @@ def test_gate_adj_spin2(nside, lmax):
     w = _alm_weight(lmax)
     rhs = np.sum(w * np.real(np.conj(aE) * b[0])) + np.sum(w * np.real(np.conj(aB) * b[1]))
     assert abs(lhs - rhs) / abs(lhs) <= ADJ_TOL
+
+
+# --------------------------------------------------------------------------- #
+# input validation + band-ceiling warning (regressions: silent gather-clamp)
+# --------------------------------------------------------------------------- #
+def test_input_validation():
+    """Wrong-size alm / map raise instead of being silently clamped by the gather."""
+    nside, lmax = 16, 24
+    K = alm_size(lmax)
+    with pytest.raises(ValueError, match="alm shape"):
+        synthesis(np.zeros(K - 1, dtype=np.complex128), nside, lmax, spin=0)
+    with pytest.raises(ValueError, match="alm shape"):
+        synthesis(np.zeros(K, dtype=np.complex128), nside, lmax, spin=2)  # missing (2, K)
+    with pytest.raises(ValueError, match="map shape"):
+        adjoint_synthesis(np.zeros(12 * nside**2 - 1), nside, lmax, spin=0)
+    with pytest.raises(ValueError, match="map shape"):
+        adjoint_synthesis(np.zeros(12 * nside**2), nside, lmax, spin=2)  # missing (2, npix)
+
+
+def test_band_ceiling_warning():
+    """lmax > 1.5*nside warns (once per geometry); lmax == 1.5*nside does not."""
+    a = np.zeros(alm_size(7), dtype=np.complex128)
+    with pytest.warns(UserWarning, match="ceiling"):
+        synthesis(a, 4, 7, spin=0)  # 7 > 1.5*4; unique geometry so the cached warn fires here

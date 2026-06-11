@@ -25,6 +25,7 @@ callers opt in per entry point.
 
 from __future__ import annotations
 
+import warnings
 from functools import lru_cache
 from typing import Callable, NamedTuple
 
@@ -183,6 +184,21 @@ class _Prepared(NamedTuple):
 def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     if spin not in (0, 2):
         raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
+    # lru_cache => each warning fires once per (nside, lmax, spin), not per call.
+    if not getattr(jax.config, "jax_enable_x64", True):  # getattr: the attr is dynamic (mypy)
+        warnings.warn(
+            "jht: jax_enable_x64 is OFF -- transforms will silently run in float32 "
+            "(~1e-5 accuracy tier, far below the documented float64 contract). "
+            'Enable it before creating any array: jax.config.update("jax_enable_x64", True).',
+            stacklevel=2,
+        )
+    if 2 * lmax > 3 * nside:  # lmax > 1.5*nside, in exact integer arithmetic
+        warnings.warn(
+            f"jht: lmax={lmax} exceeds the design band-limit ceiling 1.5*nside "
+            f"(= {1.5 * nside:g} for nside={nside}); accuracy above the ceiling is "
+            "unvalidated (see docs/accuracy.md).",
+            stacklevel=2,
+        )
     geo = RingInfo(nside)
     npix = geo.npix
     groups = _ring_groups(geo, lmax)
@@ -330,7 +346,14 @@ def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     map : real array, ``(12 nside**2,)`` for ``spin=0`` or ``(2, 12 nside**2)``
         (Q, U) for ``spin=2``, in RING order.
     """
-    return _prepare(nside, lmax, spin).synth(jnp.asarray(alm))
+    alm = jnp.asarray(alm)
+    expect = (alm_size(lmax),) if spin == 0 else (2, alm_size(lmax))
+    if alm.shape != expect:
+        raise ValueError(
+            f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
+            "(a wrong-size alm would otherwise be silently clamped by the gather)"
+        )
+    return _prepare(nside, lmax, spin).synth(alm)
 
 
 def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
@@ -347,4 +370,12 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     adjoint carries the factor-1/2 (m>0 conjugate-symmetry weight) so it is the
     strict transpose; the input is ``(2, npix)`` (Q, U) and the output ``(2, K)``.
     """
-    return _prepare(nside, lmax, spin).adj(jnp.asarray(m))
+    m = jnp.asarray(m)
+    npix = 12 * nside * nside
+    expect = (npix,) if spin == 0 else (2, npix)
+    if m.shape != expect:
+        raise ValueError(
+            f"map shape {m.shape} != expected {expect} for nside={nside}, spin={spin} "
+            "(a wrong-size map would otherwise be silently clamped by the gather)"
+        )
+    return _prepare(nside, lmax, spin).adj(m)
