@@ -194,9 +194,9 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         )
     if 2 * lmax > 3 * nside:  # lmax > 1.5*nside, in exact integer arithmetic
         warnings.warn(
-            f"jht: lmax={lmax} exceeds the design band-limit ceiling 1.5*nside "
-            f"(= {1.5 * nside:g} for nside={nside}); accuracy above the ceiling is "
-            "unvalidated (see docs/accuracy.md).",
+            f"jht: lmax={lmax} exceeds the HEALPix band-limit ceiling 1.5*nside "
+            f"(= {1.5 * nside:g} for nside={nside}); the transform is validated up to "
+            "the ceiling (to nside=4096), accuracy above it is not (see docs/accuracy.md).",
             stacklevel=2,
         )
     geo = RingInfo(nside)

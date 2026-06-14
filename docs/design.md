@@ -43,7 +43,7 @@ The standard analysis/synthesis structure:
 
 Design choices to make empirically:
 - **Dense-Legendre vs FFT-per-ring + on-the-fly recursion** — memory vs speed
-  at ℓ_max ≲ 1000. Dense Pₗₘ tables may be fine at that ℓ_max on GPU; measure.
+  at the working band limit. Dense Pₗₘ tables may be fine at moderate ℓ_max on GPU; measure.
 - **Real-aₗₘ vs complex-aₗₘ** internal representation.
 - Batching over realizations (vmap) for the sim/forecast use cases.
 

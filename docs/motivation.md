@@ -30,9 +30,10 @@ the tier where the ~1e-3 sampling floor (closed to ~1e-13 on band-limited maps
 with ring weights + iteration) is acceptable — GPU-accelerated, differentiable
 analysis — rather than displacing the most accuracy-critical (~1e-4) CPU
 production pipelines. Owning a transform means owning its numerics, chiefly
-recursion stability to ℓ_max ~ 1000 (the classic high-ℓ underflow, solved with
-libsharp-style log / X-number scaling) and the quadrature weights; both are
-bounded for the spin-0/2, ℓ_max ≲ 1000, nside ≤ ~2048 regime jht targets.
+recursion stability at high ℓ (the classic high-ℓ underflow, solved with
+libsharp-style log-renorm scaling — measured exact to ℓ = 32000) and the
+quadrature weights; both hold for the spin-0/2 regime jht targets (validated to
+nside ≤ 4096, ℓ_max ≲ 6000).
 
 See `docs/design.md` for the algorithm and conventions, and `docs/accuracy.md`
 for the measured accuracy and the validation contract.

@@ -4,6 +4,32 @@ All notable changes to jht are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-14
+
+### Added
+- **High-ℓ / high-nside validation** establishing the transform holds far past the
+  former ℓ_max ≲ 1000 / nside ≤ 2048 scope:
+  - Recursion fp64 roundoff vs a 50-digit mpmath reference: `ε·√ℓ`, flat at a few
+    ×10⁻¹⁴ to **ℓ = 32000**, spin-2 ≡ spin-0 — the libsharp-style log-renorm needs
+    no two-part (X-number) scaling (`scripts/exploratory/highL_recursion_growth.py`).
+  - Forward `synthesis` vs ducc0 **and** healpy to < 1e-10 through **nside = 4096 /
+    ℓ_max ≈ 6000**, both spins; gated routinely to nside ≤ 2048
+    (`tests/test_highL.py`, `slow`).
+  - Ring-weight solve verified well-conditioned (cond ≈ 1.24·nside) and m=0-exact
+    (~1e-16) through nside = 4096 (`tests/test_weights.py`, `slow`); the weighted
+    inverse reaches the deep ~3e-14 floor at nside = 2048.
+  - Empirical compute ceiling (`scripts/highL_ceiling.py`): nside ≤ 4096
+    compiles/runs on one CPU box; nside = 8192 is the per-ring-FFT compile wall.
+- `accuracy_sweep.py --ladder` for arbitrary (nside, lmax) inverse round-trip points.
+
+### Changed
+- **Scope statements** in the package docstring, README, and design/motivation docs
+  updated to the validated **nside ≤ 4096 / ℓ_max ≲ 6000** envelope (was
+  ℓ_max ≲ 1000, nside ≤ 2048); the band-ceiling warning notes the transform is
+  validated up to the ceiling.
+- New "High-ℓ / high-nside validation" section in `docs/accuracy.md`; the prior
+  weight-conditioning "documented follow-up" is resolved.
+
 ## [0.1.2] - 2026-06-10
 
 ### Fixed

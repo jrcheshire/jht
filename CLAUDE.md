@@ -17,8 +17,8 @@ action is the Phase-0 feasibility spike.**
 
 A focused, clean-room implementation of the forward and inverse spherical
 harmonic transform (map ↔ aₗₘ) for **spin-0 and spin-2** fields on the
-**HEALPix ring** pixelization, in the **BICEP/Keck angular regime**
-(ℓ_max ≲ 1000, nside ≤ ~2048). It exists to serve the GPU / differentiable
+**HEALPix ring** pixelization, in the **BICEP/Keck angular regime** and beyond
+(validated to nside ≤ 4096, ℓ_max ≲ 6000). It exists to serve the GPU / differentiable
 tier of analysis that a CPU-only C++ transform structurally cannot. It is
 *not* an attempt to reimplement a general all-spin / all-sampling library.
 
@@ -27,7 +27,7 @@ tier of analysis that a CPU-only C++ transform structurally cannot. It is
 **In scope (the target):**
 - Spin-0 and spin-2 (T and Q/U / E/B) transforms, forward and adjoint.
 - HEALPix ring pixelization.
-- BK regime: ℓ_max ≲ 1000, nside ≤ ~2048; partial-sky (masked) analysis.
+- BK regime and beyond: validated to nside ≤ 4096, ℓ_max ≲ 6000; partial-sky (masked) analysis.
 - GPU execution (the primary motivation) and JAX autodiff (alm-linear).
 - Validation to the relevant accuracy tier against ducc0 / healpy.
 

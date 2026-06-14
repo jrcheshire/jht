@@ -109,6 +109,66 @@ The contract gate matrix (`tests/test_accuracy.py`) includes a ceiling row
 warn (once per geometry) if called *above* the `1.5·nside` ceiling, where
 accuracy is unvalidated.
 
+## High-ℓ / high-nside validation (ℓ > 1000)
+
+The contract above is gated at nside ≤ 256. The transform is validated well past
+that on two independent axes — the recursion's *absolute* accuracy and the *full
+forward transform* vs external libraries — establishing that nothing structural
+breaks at high ℓ. (Reproduce: `scripts/exploratory/highL_recursion_growth.py` and
+`scripts/highL_ceiling.py`; gated in `tests/test_highL.py`, `slow`.)
+
+**Recursion roundoff is flat to ℓ = 32000.** jht's float64 normalized
+(spin-weighted) Legendre/Wigner recursion, compared against a 50-digit mpmath
+reference of the *same* recursion (isolating the float64 roundoff), has a
+worst-case relative error — normalized by the addition-theorem amplitude
+`√((2ℓ+1)/4π)` — that follows `ε·√ℓ` and stays at a few ×10⁻¹⁴, with spin-2 ≡ spin-0:
+
+| ℓ | spin-0 | spin-2 |
+|---:|---:|---:|
+| 500 (anchor) | 4.9e-15 | 6.1e-15 |
+| 2000 | 8.5e-15 | 1.1e-14 |
+| 8000 | 4.0e-14 | 2.3e-14 |
+| 16000 | 2.7e-14 | 2.8e-14 |
+| 32000 | 4.5e-14 | 4.2e-14 |
+
+Extrapolating the `√ℓ` law, fp64 roundoff would not reach the ~1e-3 HEALPix floor
+until ℓ ~ 10²⁵ — so the libsharp-style log-renorm needs no two-part (X-number)
+scaling at any band limit one could pixelize. The ℓ=500 row also rules out
+convention drift (jht is independently correct there to ~1e-12 vs scipy).
+
+**Forward synthesis matches ducc0 and healpy to ~1e-11 at high nside.** A
+broadband band-limited `synthesis` (the quadrature-free forward operator) vs both
+libraries, spin 0 and 2 (CPU, float64):
+
+| nside | lmax | compile | run | peak RAM | rel vs ducc / healpy |
+|---:|---:|---:|---:|---:|---:|
+| 1024 | 1500 | — | — | — | 1.9e-11 / 3.1e-12 |
+| 2048 | 2000 | 48 s | 25 s | 9.7 GB | 2.5e-11 |
+| 2048 | 3000 | 84 s | 61 s | 11.6 GB | 6.5e-11 |
+| 4096 | 4000 | 4.4 min | 3.3 min | 31 GB | 5.6e-11 |
+| 4096 | 6000 | 8.6 min | 7.5 min | 39 GB | 9.1e-11 |
+
+(spin-0 timings shown. spin-2 reaches the same frontier — nside=4096/lmax=4000 at
+8.9e-12 vs ducc, 353 s compile / 298 s run / 41 GB — and runs ~1.5× the spin-0
+cost. All rows are inside the 1e-10 operator tolerance, including the near-ceiling
+`lmax ≈ 1.5·nside` rows.)
+
+**The weighted inverse reaches the deep floor at scale.** The end-to-end
+broadband round-trip (`analysis`, weighted, niter=3) recovers the input a_lm to
+**~3e-14** at nside=1024 and nside=2048 (lmax=nside), spin 0 and 2 — the same deep
+floor as the nside ≤ 256 contract table, and 30–100× below healpy's iterated
+`map2alm` (1–3e-12). So the ring weights' `ℓ ≤ nside` exactness translates into
+machine-precision recovery at high nside, not just an exact quadrature.
+(Reproduce: `scripts/accuracy_sweep.py --ladder 1024:1024,2048:2048`.)
+
+**The ceiling is compute, not correctness.** The recursion is exact to arbitrary
+ℓ and the geometry only needs `nside ≳ ℓ/1.5`. The practical limit is the XLA
+compile of the per-ring-length FFT unroll (≈ nside distinct kernels, super-linear
+in nside): **nside ≤ 4096 (ℓ up to ~6000) compiles in minutes** on one CPU box,
+while **nside = 8192 exceeds a 40-minute compile budget**. The lever is the
+pay-once persistent compile cache (`jht.enable_compilation_cache`), not a numeric
+change. Memory scales ~linearly with pixel count (nside=4096 ≈ 31–39 GB float64).
+
 ## Iteration
 
 `analysis` runs Jacobi / stationary-Richardson on the normal equations
@@ -120,10 +180,11 @@ VJP) is **not** weighted and is unchanged by this work.
 
 ## Notes / open
 
-- **Conditioning at the ceiling (nside→2048):** the gated matrix tops out at 256;
-  the weight solve at `Lw = 2·nside` stays well-conditioned via `lstsq`. Behavior
-  at nside=2048 is a documented follow-up, not a blocker (the weights are static
-  numpy, free to use higher precision if ever needed).
+- **Weight-solve conditioning at scale (resolved):** the `Lw = 2·nside` lstsq stays
+  well-conditioned — `cond(A) ≈ 1.24·nside` (→ ~5e3 at nside=4096, ~3 digits of 16)
+  — and the m=0 quadrature stays exact to ~1e-16 **through nside=4096**, so the deep
+  inverse floor's `ℓ ≤ nside` quadrature exactness holds at scale. Gated `slow` in
+  `tests/test_weights.py`; measured by `scripts/exploratory/weight_conditioning.py`.
 - **Partial-sky (masked) analysis** has its own contract and document,
   `docs/masked.md` (the masked pseudo-a_lm + the cut-sky CG deconvolution); this
   contract is full-sky.

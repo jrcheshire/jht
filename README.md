@@ -4,9 +4,10 @@ JAX-native spherical harmonic transforms (map ↔ aₗₘ): **GPU-capable**, **f
 differentiable**, and **minimal-dependency** — pure JAX + NumPy at runtime, no
 compiled C++ extension and no third-party SHT library, so it installs with `pip`
 and needs no build toolchain. Scoped to **spin-0 and spin-2** fields on the
-**HEALPix RING** pixelization at moderate band-limit (ℓ_max ≲ 1000, nside ≤
-~2048), with both **on-grid** (pixel) and **off-grid** (arbitrary-pointing)
-transforms.
+**HEALPix RING** pixelization, validated to **nside ≤ 4096 / ℓ_max ≲ 6000** (the
+recursion is numerically exact far beyond; nside ≤ 2048 is the routine-gated
+regime, nside = 8192 the compile ceiling), with both **on-grid** (pixel) and
+**off-grid** (arbitrary-pointing) transforms.
 
 Reach for jht when you need spherical harmonic transforms that run on a GPU,
 differentiate end-to-end, and whose numerics you can read and own. The full

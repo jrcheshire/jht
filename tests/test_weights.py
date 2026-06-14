@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
+import pytest
 from numpy.polynomial.legendre import legvander
 
 from jht.healpix import RingInfo
@@ -51,6 +52,19 @@ def test_m0_quadrature_exact_to_2nside():
         assert abs(q[0] - 4.0 * np.pi) < QUAD_TOL * 4.0 * np.pi  # monopole normalization
         even = np.arange(2, 2 * nside + 1, 2)
         assert np.max(np.abs(q[even])) < QUAD_TOL * 4.0 * np.pi  # higher even moments vanish
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("nside", [1024, 2048, 4096])
+def test_m0_quadrature_exact_high_nside(nside):
+    """Weight solve stays well-conditioned (cond ~ 2*nside) and m=0-exact (~1e-16)
+    to nside=4096 -- resolves the docs/accuracy.md 'behavior at nside=2048 is a
+    documented follow-up' note (measured: scripts/exploratory/weight_conditioning.py).
+    So the lmax<=nside quadrature exactness (the deep inverse floor) holds at scale."""
+    q = _quadrature_moments(nside)
+    assert abs(q[0] - 4.0 * np.pi) < QUAD_TOL * 4.0 * np.pi
+    even = np.arange(2, 2 * nside + 1, 2)
+    assert np.max(np.abs(q[even])) < QUAD_TOL * 4.0 * np.pi
 
 
 def test_pixel_weights_sum_to_4pi():

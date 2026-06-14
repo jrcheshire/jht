@@ -19,6 +19,8 @@ dist/
 runs/
 scratch/
 gpu_diag_results.jsonl
+# regenerable mpmath / oracle reference dumps
+scripts/exploratory/*.npz
 
 # OS / editor
 .DS_Store

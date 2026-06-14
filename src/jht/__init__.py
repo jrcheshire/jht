@@ -2,9 +2,11 @@
 
 A clean-room, pure-JAX implementation of the forward and inverse spherical
 harmonic transform (map <-> a_lm) for **spin-0 and spin-2** fields on the
-**HEALPix RING** pixelization, in the BICEP/Keck angular regime
-(l_max <~ 1000, nside <= ~2048).  GPU-capable, fully differentiable under JAX's
-native autodiff, and dependency-controlled (runtime deps = jax + numpy only).
+**HEALPix RING** pixelization, validated to nside <= 4096 / l_max <~ 6000 (the
+recursion is numerically exact far beyond -- ~eps*sqrt(l) to l=32000; nside <=
+2048 is the routine-gated regime; nside=8192 is the compile ceiling).
+GPU-capable, fully differentiable under JAX's native autodiff, and
+dependency-controlled (runtime deps = jax + numpy only).
 
 Conventions (verified vs healpy 1.19.0 / ducc0 0.41.0; see ``docs/design.md``):
 healpy m-major triangular a_lm packing, orthonormal Y_lm with the
@@ -56,7 +58,7 @@ from .masked import (
 from .offgrid import adjoint_synthesis_general, synthesis_general
 from .weights import pixel_weights, ring_weights
 
-__version__ = "0.1.2"  # single source of truth; pyproject reads this via hatch
+__version__ = "0.1.3"  # single source of truth; pyproject reads this via hatch
 __author__ = "James Cheshire"
 __email__ = "cheshire@caltech.edu"
 

@@ -76,8 +76,20 @@ def sweep_one(nside: int, lmax: int, spin: int) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--max", type=int, default=256, help="largest nside to run")
+    ap.add_argument("--max", type=int, default=256, help="largest nside to run (from the default ladder)")
+    ap.add_argument(
+        "--ladder",
+        default=None,
+        help="override the (nside,lmax) ladder, e.g. '1024:1024,2048:2048' "
+        "(high-nside deep-floor / band-ceiling inverse validation)",
+    )
     args = ap.parse_args()
+
+    ladder = (
+        [(int(n), int(lm)) for n, lm in (p.split(":") for p in args.ladder.split(","))]
+        if args.ladder
+        else [(n, lm) for n, lm in LADDER if n <= args.max]
+    )
 
     hdr = (
         f"{'nside':>5} {'lmax':>5} {'spin':>4} {'unw_bare':>10} {'unw_n3':>10} "
@@ -87,9 +99,7 @@ def main() -> None:
     print("broadband band-limited round-trip, max-abs a_lm error vs ground truth\n")
     print(hdr)
     print("-" * len(hdr))
-    for nside, lmax in LADDER:
-        if nside > args.max:
-            break
+    for nside, lmax in ladder:
         for spin in (0, 2):
             r = sweep_one(nside, lmax, spin)
             hp_col = "       n/a" if np.isnan(r["hp_n3"]) else f"{r['hp_n3']:10.1e}"
