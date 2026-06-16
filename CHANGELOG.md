@@ -4,6 +4,20 @@ All notable changes to jht are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-06-16
+
+### Fixed
+- **Trace-safe Wiener-path caches.** The `lru_cache`'d geometry / index helpers on
+  the `wiener` + SHT path (`healpix._prepare`, `_analysis._wvec`,
+  `masked._dof_layout` / `_prior_ell_index`) now return NumPy instead of device
+  arrays. When first populated inside a `jit` / `grad` / `lax.scan` trace, a cached
+  value produced by a jnp op (`jnp.conj` in `_prepare`) was a tracer that leaked
+  (`UnexpectedTracerError`) on reuse from a later trace; static NumPy tables bake
+  into the jitted transforms as constants instead. No numerics change — the tables
+  are static constants (ducc0 / healpy parity unchanged) — so `wiener`,
+  `synthesis`, and `analysis` now run inside `lax.scan` and `grad`-of-`scan`
+  without a pre-warm workaround.
+
 ## [0.1.3] - 2026-06-14
 
 ### Added
