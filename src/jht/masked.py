@@ -143,11 +143,11 @@ def n_dof(lmax: int, spin: int = 0) -> int:
     return nx if spin == 0 else 2 * nx
 
 
-def _to_real_1(a: jax.Array, k_m0: jax.Array, k_mpos: jax.Array) -> jax.Array:
+def _to_real_1(a: jax.Array, k_m0: np.ndarray, k_mpos: np.ndarray) -> jax.Array:
     return jnp.concatenate([a[k_m0].real, _SQRT2 * a[k_mpos].real, _SQRT2 * a[k_mpos].imag])
 
 
-def _to_alm_1(x: jax.Array, k_m0: jax.Array, k_mpos: jax.Array, k: int) -> jax.Array:
+def _to_alm_1(x: jax.Array, k_m0: np.ndarray, k_mpos: np.ndarray, k: int) -> jax.Array:
     n0 = k_m0.shape[0]
     npp = k_mpos.shape[0]
     a = jnp.zeros(k, dtype=jnp.complex128)
