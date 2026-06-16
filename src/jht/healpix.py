@@ -202,15 +202,21 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     geo = RingInfo(nside)
     npix = geo.npix
     groups = _ring_groups(geo, lmax)
+    # Every static geometry / index table built below is kept as NumPy, NOT jnp.
+    # _prepare is lru_cached; if it is first called inside a jit / grad / lax.scan
+    # trace, a cached *device* array would be a tracer that then leaks
+    # (UnexpectedTracerError) when the returned closures run under a later trace.
+    # NumPy constants instead bake into the jitted synth/adj at compile time, and
+    # NumPy indexes / arithmetic-promotes against jnp arrays unchanged (the x args
+    # to the contract fns are jnp.asarray'd there). Same cold-cache-under-trace
+    # hazard guarded in _recursion._wigner_seed_np and the masked._dof_layout /
+    # _analysis._wvec caches.
     gather, valid, pack = _tri_dense_maps(lmax)
-    gather_j = jnp.asarray(gather)
-    valid_j = jnp.asarray(valid)
-    pack_j = jnp.asarray(pack)
 
     # per-(m, ring) azimuth phase e^{i m phi0_r}
     m_pos = np.arange(lmax + 1)
-    phase = jnp.asarray(np.exp(1j * m_pos[:, None] * geo.phi0[None, :]))  # (M, nrings)
-    conj_phase = jnp.conj(phase)
+    phase = np.exp(1j * m_pos[:, None] * geo.phi0[None, :])  # (M, nrings)
+    conj_phase = np.conj(phase)
 
     # Combined-gather assembly indices.  The per-group output writes are hoisted out of the
     # ring loop into one static-permutation GATHER: the ~nside-way fp64/complex *scatter*
@@ -220,22 +226,20 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     # concatenated in group order; ``pix_to_buf`` / ``ring_to_col`` are the inverse perms
     # back to map-pixel / ring-column order.
     buf_pix = np.concatenate([g.pix_idx.ravel() for g in groups])  # (npix,) permutation
-    pix_to_buf_np = np.empty(npix, dtype=np.int64)
-    pix_to_buf_np[buf_pix] = np.arange(npix)
-    pix_to_buf = jnp.asarray(pix_to_buf_np)
+    pix_to_buf = np.empty(npix, dtype=np.int64)
+    pix_to_buf[buf_pix] = np.arange(npix)
     ring_order = np.concatenate([g.ring_idx for g in groups])  # (nrings,) permutation
-    ring_to_col_np = np.empty(geo.nrings, dtype=np.int64)
-    ring_to_col_np[ring_order] = np.arange(geo.nrings)
-    ring_to_col = jnp.asarray(ring_to_col_np)
+    ring_to_col = np.empty(geo.nrings, dtype=np.int64)
+    ring_to_col[ring_order] = np.arange(geo.nrings)
 
     # --- North/South symmetry geometry (recursion runs on the north half + equator) ---
     # rings 0..2*nside-1 are north cap + equator; ring (4*nside-2-r) is the south
     # reflection of north ring r (r = 0..2*nside-2); the equator (r=2*nside-1) is self.
     t_half = 2 * nside
-    x_half = jnp.asarray(geo.z[:t_half])
+    x_half = geo.z[:t_half]
     south_src = np.arange(t_half - 1)  # north non-equator half indices
     south_tgt = 4 * nside - 2 - south_src  # their south full-ring indices
-    sign_m = jnp.asarray(((-1.0) ** np.arange(lmax + 1))[:, None])  # (M, 1)
+    sign_m = ((-1.0) ** np.arange(lmax + 1))[:, None]  # (M, 1)
 
     def build_full(Ftot, Fsig):  # (M, t_half) x2 -> (M, nrings) full F
         F = jnp.zeros((lmax + 1, geo.nrings), dtype=jnp.complex128)
@@ -248,10 +252,10 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         return V[:, :t_half], sign_m * Vs
 
     def tri_to_dense(alm):  # (K,) -> (M, lmax+1)
-        return jnp.where(valid_j, alm[gather_j], 0.0 + 0.0j)
+        return jnp.where(valid, alm[gather], 0.0 + 0.0j)
 
     def dense_to_tri(b_dense):  # (M, lmax+1) -> (K,): gather, not scatter (fp64 GPU)
-        return b_dense.ravel()[pack_j]
+        return b_dense.ravel()[pack]
 
     if spin == 0:
         plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
