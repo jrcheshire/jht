@@ -25,15 +25,24 @@ from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .healpix import adjoint_synthesis, synthesis
 from .weights import pixel_weights
 
 
 @lru_cache(maxsize=None)
-def _wvec(nside: int, spin: int, use_weights: bool) -> jax.Array:
-    """Per-pixel quadrature weights as a (broadcastable) jax array, cached."""
-    wv = jnp.asarray(pixel_weights(nside, use_weights))
+def _wvec(nside: int, spin: int, use_weights: bool) -> np.ndarray:
+    """Per-pixel quadrature weights (broadcastable), cached as NumPy.
+
+    NumPy (not jnp): an ``lru_cache`` that returns a *device* array caches a tracer
+    if first called inside a ``jit`` / ``grad`` / ``lax.scan`` trace, which then
+    leaks (``UnexpectedTracerError``) on a later access from a different trace.
+    NumPy weights multiply jnp maps unchanged (``np * jnp -> jnp``), so
+    :func:`bare_analysis` is unaffected.  Same cold-cache-under-trace hazard guarded
+    in :func:`_recursion._wigner_seed_np` and :func:`masked._dof_layout`.
+    """
+    wv = pixel_weights(nside, use_weights)
     return wv if spin == 0 else wv[None, :]  # (Npix,) for spin 0, (1, Npix) for spin 2
 
 

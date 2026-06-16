@@ -115,7 +115,7 @@ def pseudo_alm(maps, mask, nside: int, lmax: int, spin: int = 0, niter: int = 3,
 # the real-DOF isometry  T : a (complex, healpy-packed) <-> x (real)
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=None)
-def _dof_layout(lmax: int, spin: int) -> tuple[jax.Array, jax.Array, int, int]:
+def _dof_layout(lmax: int, spin: int) -> tuple[np.ndarray, np.ndarray, int, int]:
     """Static index arrays for ``T``: ``(k_m0, k_mpos, K, nx_per_channel)``.
 
     ``k_m0`` are the flat a_lm indices with ``m=0`` and ``l>=|spin|``; ``k_mpos``
@@ -129,7 +129,12 @@ def _dof_layout(lmax: int, spin: int) -> tuple[jax.Array, jax.Array, int, int]:
     k_m0 = idx[active & (ms == 0)]
     k_mpos = idx[active & (ms > 0)]
     nx = int(k_m0.size + 2 * k_mpos.size)
-    return jnp.asarray(k_m0), jnp.asarray(k_mpos), alm_size(lmax), nx
+    # NumPy (not jnp): these are static gather indices (lmax/spin only). An
+    # lru_cache that returns a jnp array caches a *tracer* if first called under a
+    # jit/grad/scan trace, which then leaks (UnexpectedTracerError) -- the same
+    # cold-cache-under-trace hazard guarded in _recursion._wigner_seed. NumPy
+    # indices gather into jnp arrays unchanged (jnp[np]), so callers are unaffected.
+    return k_m0, k_mpos, alm_size(lmax), nx
 
 
 def n_dof(lmax: int, spin: int = 0) -> int:
@@ -138,11 +143,11 @@ def n_dof(lmax: int, spin: int = 0) -> int:
     return nx if spin == 0 else 2 * nx
 
 
-def _to_real_1(a: jax.Array, k_m0: jax.Array, k_mpos: jax.Array) -> jax.Array:
+def _to_real_1(a: jax.Array, k_m0: np.ndarray, k_mpos: np.ndarray) -> jax.Array:
     return jnp.concatenate([a[k_m0].real, _SQRT2 * a[k_mpos].real, _SQRT2 * a[k_mpos].imag])
 
 
-def _to_alm_1(x: jax.Array, k_m0: jax.Array, k_mpos: jax.Array, k: int) -> jax.Array:
+def _to_alm_1(x: jax.Array, k_m0: np.ndarray, k_mpos: np.ndarray, k: int) -> jax.Array:
     n0 = k_m0.shape[0]
     npp = k_mpos.shape[0]
     a = jnp.zeros(k, dtype=jnp.complex128)
@@ -174,7 +179,7 @@ def real_to_alm(x, lmax: int, spin: int = 0) -> jax.Array:
 # Cl signal prior: the x-space whitening  P = T C^1/2 T^-1 = diag(sqrt(Cl))
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=None)
-def _prior_ell_index(lmax: int, spin: int) -> jax.Array:
+def _prior_ell_index(lmax: int, spin: int) -> np.ndarray:
     """Per-DOF multipole ``l`` for one channel, in the ``_to_real_1`` layout.
 
     ``T`` sends ``a_{l0} -> x`` and ``a_{lm>0} -> [sqrt2 Re, sqrt2 Im]``, so the
@@ -188,7 +193,9 @@ def _prior_ell_index(lmax: int, spin: int) -> jax.Array:
     active = ls >= abs(spin)
     l_m0 = ls[active & (ms == 0)]
     l_mpos = ls[active & (ms > 0)]
-    return jnp.asarray(np.concatenate([l_m0, l_mpos, l_mpos]))
+    # NumPy (not jnp): static per-DOF multipole index, lru_cached -- see
+    # _dof_layout on why a cached jnp array would leak a tracer under a trace.
+    return np.concatenate([l_m0, l_mpos, l_mpos])
 
 
 def _prior_sqrt(signal_cl, lmax: int, spin: int) -> jax.Array:
