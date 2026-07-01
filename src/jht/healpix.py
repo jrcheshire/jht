@@ -33,6 +33,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._azimuth import build_cap_plan, cap_adjoint, cap_synth, get_azimuth_fft_mode
 from ._recursion import (
     adjoint_contract_eo,
     adjoint_contract_spin2_ns,
@@ -181,7 +182,12 @@ class _Prepared(NamedTuple):
 
 
 @lru_cache(maxsize=None)
-def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
+def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _Prepared:
+    # ``fft_mode`` is part of the cache key: :func:`synthesis` / :func:`adjoint_synthesis`
+    # read the process-global azimuth mode and forward it here, so flipping the mode
+    # compiles a fresh kernel (both variants coexist) rather than silently returning a
+    # stale one.  Do NOT read the global inside this cached body -- that is the
+    # ``jax_enable_x64`` hazard below (a global read here is invisible to the key).
     if spin not in (0, 2):
         raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
     # lru_cache => each warning fires once per (nside, lmax, spin), not per call.
@@ -257,6 +263,17 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     def dense_to_tri(b_dense):  # (M, lmax+1) -> (K,): gather, not scatter (fp64 GPU)
         return b_dense.ravel()[pack]
 
+    # Looped (chirp-z) mode reroutes the polar-cap azimuth FFTs through one common-length
+    # ``lax.scan`` (O(1) compiled kernels) and keeps the belt on its native single FFT; the
+    # ``azimuth_groups`` the per-length loop still handles are then just the belt.  Requires
+    # >1 group (nside=1 is belt-only and already O(1), so it stays unrolled).
+    looped = fft_mode == "looped" and len(groups) > 1
+    if looped:
+        cap_plan = build_cap_plan(geo, groups[:-1], lmax)
+        azimuth_groups = groups[-1:]  # belt only; caps handled by the chirp-z scan
+    else:
+        azimuth_groups = groups
+
     if spin == 0:
         plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
 
@@ -264,8 +281,8 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         def synth(alm):
             Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm))
             G = build_full(Ftot, Fsig) * phase  # (M, nrings)
-            cols = []
-            for g in groups:
+            cols = [jnp.real(cap_synth(cap_plan, G, G))] if looped else []
+            for g in azimuth_groups:
                 Cp = G[:, g.ring_idx]  # (M, n_g)
                 D = jnp.zeros((g.ring_idx.size, g.N), dtype=jnp.complex128)
                 D = D.at[:, g.k_plus].add(Cp.T)
@@ -276,7 +293,10 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         @jax.jit
         def adj(m):
             cols = []
-            for g in groups:
+            if looped:
+                vg = (m[cap_plan.map_gather] * cap_plan.mask).astype(jnp.complex128)  # (n_cap,2,n_out)
+                cols.append(cap_adjoint(cap_plan, vg)[0])  # (M, n_cap*2)
+            for g in azimuth_groups:
                 fr = jnp.fft.fft(m[g.pix_idx], axis=1)  # (n_g, N)
                 ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
                 cols.append((fr[:, g.g_plus] * ph).T)  # (M, n_g)
@@ -298,8 +318,8 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
         )
         Fp = build_full(FpN, FpS) * phase
         Fm = build_full(FmN, FmS) * phase
-        cols = []
-        for g in groups:
+        cols = [cap_synth(cap_plan, Fp, Fm)] if looped else []
+        for g in azimuth_groups:
             Cp = Fp[:, g.ring_idx]
             Cm = Fm[:, g.ring_idx]
             D = jnp.zeros((g.ring_idx.size, g.N), dtype=jnp.complex128)
@@ -313,7 +333,14 @@ def _prepare(nside: int, lmax: int, spin: int) -> _Prepared:
     def adj2(maps2d):  # (2, npix) -> (2, K)
         colsp = []
         colsm = []
-        for g in groups:
+        if looped:
+            g_in = cap_plan.map_gather
+            QpiU = (maps2d[0] + 1j * maps2d[1])[g_in] * cap_plan.mask  # (n_cap,2,n_out)
+            QmiU = (maps2d[0] - 1j * maps2d[1])[g_in] * cap_plan.mask
+            Vc = cap_adjoint(cap_plan, jnp.concatenate([QpiU, QmiU], axis=1))  # (2, M, n_cap*2)
+            colsp.append(Vc[0])
+            colsm.append(Vc[1])
+        for g in azimuth_groups:
             W = jnp.fft.fft(maps2d[0][g.pix_idx] + 1j * maps2d[1][g.pix_idx], axis=1)  # (n_g, N)
             ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
             colsp.append((W[:, g.g_plus] * ph).T)  # (M, n_g)
@@ -357,7 +384,7 @@ def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
             f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
             "(a wrong-size alm would otherwise be silently clamped by the gather)"
         )
-    return _prepare(nside, lmax, spin).synth(alm)
+    return _prepare(nside, lmax, spin, get_azimuth_fft_mode()).synth(alm)
 
 
 def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
@@ -382,4 +409,4 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
             f"map shape {m.shape} != expected {expect} for nside={nside}, spin={spin} "
             "(a wrong-size map would otherwise be silently clamped by the gather)"
         )
-    return _prepare(nside, lmax, spin).adj(m)
+    return _prepare(nside, lmax, spin, get_azimuth_fft_mode()).adj(m)

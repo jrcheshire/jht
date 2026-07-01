@@ -157,13 +157,15 @@ assembly:
 The FFT-unroll assembly is ~93% of the compile at nside=2048 and scales
 super-linearly (the kernel *count* ∝ nside and each kernel's length grows too); the
 recursion compiles in ~1.6 s. (At *runtime* the inversion holds — the recursion
-dominates, the many tiny FFTs are cheap to run.) The unroll is unavoidable: distinct
-static FFT lengths cannot be batched, and padding to a common length is numerically
-invalid (a length-N ring needs an exact length-N FFT).
+dominates, the many tiny FFTs are cheap to run.) A length-N ring needs an exact
+length-N FFT, so distinct ring lengths cannot share a kernel and padding to a common
+length is numerically invalid (it changes which harmonics alias, `m -> m mod N`).
 
-So the lever is not to shrink the compile but to make it **pay-once-ever** — opt in to
-JAX's persistent on-disk compilation cache, which jht exposes as a one-liner (it flips
-global JAX config, so, like x64, the entry point opts in and the library never does):
+There are two levers:
+
+**1. Pay the compile once — persistent cache.** Opt in to JAX's on-disk compilation
+cache, which jht exposes as a one-liner (it flips global JAX config, so, like x64, the
+entry point opts in and the library never does):
 
 ```python
 import jht
@@ -171,7 +173,31 @@ jht.enable_compilation_cache("~/.cache/jht-xla")   # before the first transform 
 ```
 
 The first nside≥1024 compile is then written to disk and reused by every later process
-(keyed by jaxlib version + accelerator + the program); numerics are untouched. A
-genuine *structural* reduction (e.g. Bluestein at a common power-of-2 length to
-collapse the per-length FFTs into a handful — exact, but more runtime FLOPs and its
-own validation) is a possible future lever, not yet implemented.
+(keyed by jaxlib version + accelerator + the program); numerics are untouched.
+
+**2. Structurally collapse the kernel count — looped/chirp-z mode.** Opt in with
+`jht.set_azimuth_fft_mode("looped")` (or `jht.enable_looped_fft()`). It reroutes the
+polar-cap FFTs — every distinct cap length, ~nside of them — through **one common-length
+Bluestein (chirp-z) transform inside a single `lax.scan`**, keeping the equatorial belt
+on its native FFT. A chirp-z evaluates the exact pruned/aliased length-N DFT via a
+fixed length-L convolution, so all cap lengths share one FFT kernel: the compiled
+FFT-kernel count drops from **~nside to O(1)**. This is the lever for SHT-heavy /
+high-nside *differentiable* graphs (e.g. a masked Wiener + bandpower forecast), where the
+unrolled path's executable size — not memory — is the wall (it can exceed XLA's 2 GB
+executable cap before it OOMs).
+
+The tradeoff is a bounded per-run FLOP tax on the cap rings (each computed at the common
+length `L ≈ 5.5·nside ≥ N`); the belt — the runtime bulk — is untouched. Measured (CPU,
+fp64, `scripts/profile_compile_time.py`):
+
+| nside | compile: unrolled → looped | steady runtime tax |
+|------:|---------------------------:|-------------------:|
+| 128   | 1123 ms → 153 ms (7.3×)    | 1.15×              |
+| 256   | 2160 ms → 341 ms (6.3×)    | 1.11×              |
+
+i.e. ~6–7× faster to compile with only an ~11–15% steady-runtime tax (well under the
+≤2× a-priori budget), and the compile win widens with nside (unrolled compile ∝ nside,
+looped ≈ flat). The default stays `"unrolled"` — faster for a single transform, and its
+one-time compile is cached by lever 1. Numerically the two modes agree to FFT roundoff
+(gated at `atol=1e-12` vs the unrolled path, plus healpy/ducc0 parity;
+`tests/test_azimuth_fft.py`).

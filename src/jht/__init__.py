@@ -32,6 +32,7 @@ See ``README.md`` for the tour, ``docs/consumers.md`` for the downstream seam
 from __future__ import annotations
 
 from ._analysis import analysis, bare_analysis, map2alm
+from ._azimuth import enable_looped_fft, get_azimuth_fft_mode, set_azimuth_fft_mode
 from ._cache import enable_compilation_cache
 from .diff import (
     adjoint_synthesis_general_real,
@@ -58,7 +59,7 @@ from .masked import (
 from .offgrid import adjoint_synthesis_general, synthesis_general
 from .weights import pixel_weights, ring_weights
 
-__version__ = "0.1.4"  # single source of truth; pyproject reads this via hatch
+__version__ = "0.2.0"  # single source of truth; pyproject reads this via hatch
 __author__ = "James Cheshire"
 __email__ = "cheshire@caltech.edu"
 
@@ -97,4 +98,9 @@ __all__ = [
     "alm_metric_weight",  # the (2 - delta_m0) metric G (the bk-jax 2*conj bridge)
     # compile-latency: opt in to JAX's persistent on-disk compilation cache
     "enable_compilation_cache",
+    # azimuth-FFT strategy: opt in to the looped/chirp-z cap path (O(1) compiled
+    # kernels for SHT-heavy / high-nside differentiable graphs)
+    "set_azimuth_fft_mode",
+    "get_azimuth_fft_mode",
+    "enable_looped_fft",
 ]
