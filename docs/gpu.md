@@ -205,9 +205,13 @@ same values, gated by the full CPU suite + GPU==CPU parity):
   4.4e-13 / 1.4e-14 spin-0; 3.1e-13 / 2.0e-14 spin-2). Runtime fits in a ~20 GB slice.
   The first compile is multi-minute and structural — ~458 s at nside=2048, **93% the
   per-length FFT unroll** (`n_groups` = nside distinct FFT kernels; the recursion is
-  ~1.6 s). It can't be cheaply shrunk, but `jht.enable_compilation_cache(dir)` opts in
-  to JAX's persistent on-disk cache so it is paid **once ever**, not per run — see
-  `docs/performance.md` "Compile time".
+  ~1.6 s). Two levers: `jht.enable_compilation_cache(dir)` opts in to JAX's persistent
+  on-disk cache so it is paid **once ever**, not per run; and
+  `jht.set_azimuth_fft_mode("looped")` **collapses those ~nside cap FFT kernels to O(1)**
+  via a common-length chirp-z `lax.scan` (belt kept native), which is what keeps an
+  SHT-heavy differentiable graph under XLA's 2 GB executable cap — ~6–7× faster compile
+  for an ~11–15% steady-runtime tax (CPU-measured). See `docs/performance.md`
+  "Compile time".
 
 ## Cluster / CUDA notes
 

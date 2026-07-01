@@ -27,6 +27,13 @@ channels.  Run on a SLURM GPU cluster (a 20 GB MIG holds nside=2048):
     pixi run -e gpu python scripts/profile_compile_time.py [--nsides 256,512,1024,2048]
 CPU compiles too (slower) -- fine for the scaling shape without a GPU slot; use
 `--skip-synth` and small nsides for a quick local check.
+
+The suspected fix is now SHIPPED as the opt-in looped/chirp-z azimuth mode
+(`jht.set_azimuth_fft_mode("looped")`, :mod:`jht._azimuth`): it reroutes the ~nside
+per-length cap FFTs through one common-length Bluestein `lax.scan` (belt kept native),
+so the compiled FFT-kernel count drops from ~nside to O(1).  This probe now reports
+`synth` compile+steady under BOTH modes (`(U)` unrolled default, `(L)` looped) so the
+compile-size win and the per-run FLOP tax show side by side.
 """
 
 from __future__ import annotations
@@ -91,14 +98,15 @@ def main() -> None:
     import numpy as np  # noqa: E402
 
     import jht  # noqa: E402
+    from jht import set_azimuth_fft_mode  # noqa: E402
     from jht._recursion import build_recursion_plan, synth_contract_eo  # noqa: E402
     from jht.healpix import RingInfo, _ring_groups, alm_size  # noqa: E402
 
     dev = next((d for d in jax.devices() if d.platform == "gpu"), jax.devices("cpu")[0])
     print(f"profile_compile_time  dtype={args.dtype}  device={dev}  jax={jax.__version__}")
     hdr = (
-        f"{'nside':>5} {'lmax':>5} {'n_grp':>6} {'synth_c':>9} {'synth_r':>9} "
-        f"{'asm_c':>9} {'asm_r':>8} {'rec_c':>9} {'rec_r':>8}  (ms)"
+        f"{'nside':>5} {'lmax':>5} {'n_grp':>6} {'synthU_c':>9} {'synthU_r':>9} "
+        f"{'synthL_c':>9} {'synthL_r':>9} {'asm_c':>9} {'rec_c':>9}  (ms)"
     )
 
     rng = np.random.default_rng(0)
@@ -146,7 +154,8 @@ def main() -> None:
         return groups, lambda: asm(G), lambda: rec(dense), lambda: jht.synthesis(alm, nside, lmax, 0)
 
     print(hdr + "\n" + "-" * len(hdr))
-    print("  *_c = compile(+first run), *_r = steady run.  synth_c ~= rec_c + asm_c.")
+    print("  *_c = compile(+first run), *_r = steady run.  U = unrolled (~nside kernels),")
+    print("  L = looped/chirp-z (O(1) kernels).  synthU_c ~= rec_c + asm_c.")
 
     for nside in [int(x) for x in args.nsides.split(",")]:
         lmax = LADDER.get(nside, min(1000, int(1.5 * nside)))
@@ -165,12 +174,19 @@ def main() -> None:
 
         with jax.default_device(dev):
             _groups, asm_fn, rec_fn, synth_fn = build(nside, lmax)
-            sc, sr = ("skip", "skip") if args.skip_synth else _compile_run(synth_fn)
-            ac, ar = _compile_run(asm_fn)
-            rc, rr = _compile_run(rec_fn)
+            if args.skip_synth:
+                suc = sur = slc = slr = "skip"
+            else:
+                set_azimuth_fft_mode("unrolled")
+                suc, sur = _compile_run(synth_fn)
+                set_azimuth_fft_mode("looped")
+                slc, slr = _compile_run(synth_fn)
+                set_azimuth_fft_mode("unrolled")
+            ac, _ar = _compile_run(asm_fn)
+            rc, _rr = _compile_run(rec_fn)
         print(
-            f"{nside:>5} {lmax:>5} {n_groups:>6} {fmt(sc):>9} {fmt(sr):>9} "
-            f"{fmt(ac):>9} {fmt(ar):>8} {fmt(rc):>9} {fmt(rr):>8}",
+            f"{nside:>5} {lmax:>5} {n_groups:>6} {fmt(suc):>9} {fmt(sur):>9} "
+            f"{fmt(slc):>9} {fmt(slr):>9} {fmt(ac):>9} {fmt(rc):>9}",
             flush=True,
         )
 

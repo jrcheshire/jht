@@ -4,6 +4,34 @@ All notable changes to jht are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-30
+
+### Added
+- **Opt-in looped/chirp-z azimuth-FFT mode** (`set_azimuth_fft_mode("looped")` /
+  `enable_looped_fft()`; default stays `"unrolled"`). The default path emits one FFT
+  kernel per distinct HEALPix ring length (`~nside` kernels), so compile time /
+  executable size scale as `nside x (#SHTs in the graph)` — an SHT-heavy differentiable
+  graph (e.g. a masked Wiener + bandpower forecast) can exceed XLA's 2 GB executable cap
+  before it runs out of memory (GitHub #2). The looped mode reroutes the polar-cap FFTs
+  through **one common-length Bluestein (chirp-z) transform inside a single `lax.scan`**
+  (the equatorial belt keeps its native FFT), dropping the compiled FFT-kernel count from
+  **~nside to O(1)**. A chirp-z evaluates the exact pruned/aliased length-N DFT via a
+  fixed length-L convolution, so the ~nside distinct cap lengths share one FFT kernel
+  without the (invalid) padding to a common length.
+  - The mode is a process-global flip (like `enable_compilation_cache`), read by
+    `synthesis` / `adjoint_synthesis` and forwarded as part of the transform cache key,
+    so the whole `analysis` / masked / Wiener chain inherits it and both variants coexist.
+  - Numerically an exact FFT-algebra identity: gated at `atol=1e-12` vs the unrolled path
+    (spin 0/2, synthesis + adjoint, incl. the band-ceiling `N=4` aliasing and the spin-2
+    +2/-2 channel asymmetry), plus healpy/ducc0 parity and the transpose inner-product
+    identity with the mode on, and jit/grad/`lax.scan` safety (`tests/test_azimuth_fft.py`,
+    `tests/test_azimuth_compile.py`). Chirp phases use an exact `k^2 mod 2N` argument
+    reduction (mandatory: without it the `N=4` rings at large `lmax` lose ~8 digits).
+  - Tradeoff: a bounded per-run FLOP tax on the cap rings (each at the common length
+    `L ≈ 5.5·nside`); the belt — the runtime bulk — is untouched. Measured (CPU, fp64):
+    ~6–7× faster compile for an ~11–15% steady-runtime tax at nside 128–256 (well under
+    the ≤2× budget; `scripts/profile_compile_time.py` reports both modes side by side).
+
 ## [0.1.4] - 2026-06-16
 
 ### Fixed

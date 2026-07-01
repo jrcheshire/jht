@@ -13,8 +13,8 @@ authors:
     family-names: Cheshire
     email: cheshire@caltech.edu
     affiliation: California Institute of Technology
-version: 0.1.4
-date-released: 2026-06-16
+version: 0.2.0
+date-released: 2026-06-30
 license: MIT
 repository-code: "https://github.com/jrcheshire/jht"
 keywords:
