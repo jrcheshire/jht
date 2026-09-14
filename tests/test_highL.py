@@ -13,8 +13,8 @@ so it is a clean recursion/assembly check independent of ring weights.  The weig
 *analysis* round-trip at high nside (the quadrature/weight-conditioning tier) is a
 separate contract -- see ``docs/accuracy.md`` "Notes / open".
 
-Heavy (nside up to 2048, ~13 GB, multi-second compiles) -> marked ``slow``: runs in
-the full suite / nightly, not the fast per-push gate.
+Heavy (nside up to 2048, up to ~13 GB peak RSS, multi-second compiles) -> marked ``slow``
+and ``heavy``: runs in the local full suite (``pixi run test``), not in CI.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import pytest  # noqa: E402
 
 from jht.healpix import alm_column_base, alm_size, synthesis  # noqa: E402
 
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.slow, pytest.mark.heavy]
 
 HIGHL_TOL = 1e-10  # a-priori; same operator tier as test_healpix (measured ~1e-12)
 

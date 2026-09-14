@@ -20,5 +20,9 @@ jobs:
           locked: true
           cache: true
 
-      - name: Test (full -- incl. `slow`)
-        run: pixi run test
+      # `heavy` tests (peak RSS beyond a hosted runner, up to ~13 GB) are excluded here;
+      # run them locally with `pixi run test`.
+      - name: Test (full -- incl. `slow`, excl. `heavy`)
+        run: pixi run pytest -n auto -m "not heavy"
+        env:
+          OMP_NUM_THREADS: "1"

@@ -129,4 +129,5 @@ ignore_missing_imports = true
 # still run them, so no coverage is lost -- only rescheduled.
 markers = [
   "slow: heavy oracle / sweep test; run by the full suite + nightly, not the fast gate",
+  "heavy: peak memory beyond a GitHub-hosted runner (>3 GB); run locally (`pixi run test`), never in CI",
 ]
