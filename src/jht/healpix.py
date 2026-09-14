@@ -33,7 +33,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._azimuth import build_cap_plan, cap_adjoint, cap_synth, get_azimuth_fft_mode
+from ._azimuth import (
+    build_cap_plan,
+    cap_adjoint,
+    cap_gather_mask,
+    cap_synth,
+    get_azimuth_fft_mode,
+)
 from ._recursion import (
     adjoint_contract_eo,
     adjoint_contract_spin2_ns,
@@ -219,10 +225,13 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
     # _analysis._wvec caches.
     gather, valid, pack = _tri_dense_maps(lmax)
 
-    # per-(m, ring) azimuth phase e^{i m phi0_r}
+    # per-(m, ring) azimuth phase e^{i m phi0_r}, built in-trace so the (M, nrings) table is
+    # a runtime buffer, not an embedded constant per use (jht#5)
     m_pos = np.arange(lmax + 1)
-    phase = np.exp(1j * m_pos[:, None] * geo.phi0[None, :])  # (M, nrings)
-    conj_phase = np.conj(phase)
+
+    def phase_table():  # (M, nrings)
+        z = 1j * jnp.asarray(m_pos, dtype=jnp.float64)[:, None] * jnp.asarray(geo.phi0)[None, :]
+        return jax.lax.optimization_barrier(jnp.exp(z))
 
     # Combined-gather assembly indices.  The per-group output writes are hoisted out of the
     # ring loop into one static-permutation GATHER: the ~nside-way fp64/complex *scatter*
@@ -280,7 +289,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         @jax.jit
         def synth(alm):
             Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm))
-            G = build_full(Ftot, Fsig) * phase  # (M, nrings)
+            G = build_full(Ftot, Fsig) * phase_table()  # (M, nrings)
             cols = [jnp.real(cap_synth(cap_plan, G, G))] if looped else []
             for g in azimuth_groups:
                 Cp = G[:, g.ring_idx]  # (M, n_g)
@@ -294,8 +303,10 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         def adj(m):
             cols = []
             if looped:
-                vg = (m[cap_plan.map_gather] * cap_plan.mask).astype(jnp.complex128)  # (n_cap,2,n_out)
+                g_in, cmask = cap_gather_mask(cap_plan)
+                vg = (m[g_in] * cmask).astype(jnp.complex128)  # (n_cap,2,n_out)
                 cols.append(cap_adjoint(cap_plan, vg)[0])  # (M, n_cap*2)
+            conj_phase = jnp.conj(phase_table())
             for g in azimuth_groups:
                 fr = jnp.fft.fft(m[g.pix_idx], axis=1)  # (n_g, N)
                 ph = conj_phase[:, g.ring_idx].T  # (n_g, M)
@@ -316,6 +327,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         FpN, FpS, FmN, FmS = synth_contract_spin2_ns(
             plan_p, plan_m, x_half, -(aE + 1j * aB), -(aE - 1j * aB)
         )
+        phase = phase_table()
         Fp = build_full(FpN, FpS) * phase
         Fm = build_full(FmN, FmS) * phase
         cols = [cap_synth(cap_plan, Fp, Fm)] if looped else []
@@ -334,12 +346,13 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         colsp = []
         colsm = []
         if looped:
-            g_in = cap_plan.map_gather
-            QpiU = (maps2d[0] + 1j * maps2d[1])[g_in] * cap_plan.mask  # (n_cap,2,n_out)
-            QmiU = (maps2d[0] - 1j * maps2d[1])[g_in] * cap_plan.mask
+            g_in, cmask = cap_gather_mask(cap_plan)
+            QpiU = (maps2d[0] + 1j * maps2d[1])[g_in] * cmask  # (n_cap,2,n_out)
+            QmiU = (maps2d[0] - 1j * maps2d[1])[g_in] * cmask
             Vc = cap_adjoint(cap_plan, jnp.concatenate([QpiU, QmiU], axis=1))  # (2, M, n_cap*2)
             colsp.append(Vc[0])
             colsm.append(Vc[1])
+        conj_phase = jnp.conj(phase_table())
         for g in azimuth_groups:
             W = jnp.fft.fft(maps2d[0][g.pix_idx] + 1j * maps2d[1][g.pix_idx], axis=1)  # (n_g, N)
             ph = conj_phase[:, g.ring_idx].T  # (n_g, M)

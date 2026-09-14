@@ -93,7 +93,11 @@ def enable_looped_fft() -> None:
 # cap plan (static NumPy tables)
 # --------------------------------------------------------------------------- #
 class CapPlan(NamedTuple):
-    """Static tables for the looped cap azimuth transform (all NumPy)."""
+    """Static inputs for the looped cap azimuth transform (small NumPy vectors).
+
+    The ``(n_cap, 2, n_out)`` gather/mask and the ``(n_cap, 2, M)`` phase are built
+    in-trace by :func:`cap_gather_mask` and :func:`cap_conj_phase` (jht#5).
+    """
 
     M: int  # lmax + 1
     L: int  # common Bluestein FFT length
@@ -102,9 +106,8 @@ class CapPlan(NamedTuple):
     cap_N: np.ndarray  # (n_cap,)     per-group ring length
     ring_idx: np.ndarray  # (n_cap, 2)   ring columns (north, south) into (M, nrings)
     take: np.ndarray  # (npix_cap,)  gather (n_cap, 2, n_out) -> cap buffer order
-    map_gather: np.ndarray  # (n_cap, 2, n_out) gather map pixels -> padded ring samples
-    mask: np.ndarray  # (n_cap, 2, n_out) 1.0 where j < N, else 0.0 (zero the pad)
-    conj_phase: np.ndarray  # (n_cap, 2, M) e^{-i m phi0} per cap ring (adjoint post-phase)
+    start: np.ndarray  # (n_cap, 2)   first map pixel of each cap ring
+    phi0: np.ndarray  # (n_cap, 2)   azimuth of each cap ring's first pixel
 
 
 def build_cap_plan(geo, cap_groups: list, lmax: int) -> CapPlan:
@@ -124,24 +127,38 @@ def build_cap_plan(geo, cap_groups: list, lmax: int) -> CapPlan:
     # take: gather a (n_cap, 2, n_out) buffer -> the cap portion of the assembly
     # buffer, which is concat over groups of g.pix_idx.ravel() = [north 0..N-1, south 0..N-1].
     take_list: list[int] = []
-    map_gather = np.zeros((n_cap, 2, n_out), dtype=np.int64)
-    mask = np.zeros((n_cap, 2, n_out), dtype=np.float64)
     for gi, g in enumerate(cap_groups):
         N = int(g.N)
         for r in range(2):
             for j in range(N):
                 take_list.append(gi * (2 * n_out) + r * n_out + j)
-            map_gather[gi, r, :N] = g.pix_idx[r]
-            mask[gi, r, :N] = 1.0
     take = np.array(take_list, dtype=np.int64)  # (npix_cap,)
 
-    # conj_phase[gi, r, m] = e^{-i m phi0_ring}
-    m_pos = np.arange(M)
+    # ring pixels are contiguous: g.pix_idx[r] == startpix[ring] + arange(N)
+    start = geo.startpix[ring_idx].astype(np.int64)  # (n_cap, 2)
     phi0 = geo.phi0[ring_idx]  # (n_cap, 2)
-    conj_phase = np.exp(-1j * m_pos[None, None, :] * phi0[:, :, None])  # (n_cap, 2, M)
 
     return CapPlan(M=M, L=L, n_out=n_out, n_cap=n_cap, cap_N=cap_N, ring_idx=ring_idx,
-                   take=take, map_gather=map_gather, mask=mask, conj_phase=conj_phase)
+                   take=take, start=start, phi0=phi0)
+
+
+def cap_gather_mask(plan: CapPlan) -> tuple[jax.Array, jax.Array]:
+    """In-trace ``(map_gather, mask)``, both ``(n_cap, 2, n_out)``.
+
+    ``map_gather`` is the map pixel feeding each padded ring sample (0 in the pad);
+    ``mask`` is 1.0 where the sample is a real pixel (``j < N``), else 0.0.
+    """
+    j = jnp.arange(plan.n_out)[None, None, :]
+    inside = jnp.broadcast_to(j < jnp.asarray(plan.cap_N)[:, None, None], (plan.n_cap, 2, plan.n_out))
+    gather = jnp.where(inside, jnp.asarray(plan.start)[:, :, None] + j, 0)
+    return jax.lax.optimization_barrier((gather, inside.astype(jnp.float64)))
+
+
+def cap_conj_phase(plan: CapPlan) -> jax.Array:
+    """In-trace ``(n_cap, 2, M)`` adjoint post-phase ``e^{-i m phi0}`` per cap ring."""
+    m = jnp.arange(plan.M, dtype=jnp.float64)
+    z = -1j * m[None, None, :] * jnp.asarray(plan.phi0)[:, :, None]
+    return jax.lax.optimization_barrier(jnp.exp(z))
 
 
 # --------------------------------------------------------------------------- #
@@ -226,7 +243,7 @@ def cap_adjoint(plan: CapPlan, cols: jax.Array) -> jax.Array:
     n_ch = C2 // 2
     # reshape to (n_ch, 2, ...) so conj_phase (n_cap, 2, M) broadcasts over rings
     out = out.reshape(plan.n_cap, n_ch, 2, M)  # (n_cap, C, 2, M)
-    V = out * plan.conj_phase[:, None, :, :]  # (n_cap, C, 2, M)
+    V = out * cap_conj_phase(plan)[:, None, :, :]  # (n_cap, C, 2, M)
     # -> per channel: (M, n_cap*2) with column order [g0_n, g0_s, g1_n, ...]
     V = jnp.transpose(V, (1, 3, 0, 2))  # (C, M, n_cap, 2)
     return V.reshape(n_ch, M, plan.n_cap * 2)  # (C, M, n_cap*2)
