@@ -15,10 +15,9 @@ On a CPU-only machine (e.g. osx-arm64 dev) it still runs -- parity is skipped an
 timing is on the CPU -- so it is never dead code. The *measured* GPU numbers are
 deferred to the NVIDIA box. See ``docs/gpu.md``.
 
-Parity note: ``jht.healpix._prepare`` is ``lru_cache``-d and closes over
-device-resident constants placed at first-call time, so to genuinely run the same
-program on each device we clear the caches and rebuild under
-``jax.default_device(dev)``.
+Parity note: ``jht.healpix._prepare`` is ``lru_cache``-d (its large tables are built
+inside each kernel's trace), so to genuinely run the same program on each device we
+clear the caches and rebuild under ``jax.default_device(dev)``.
 """
 
 from __future__ import annotations
