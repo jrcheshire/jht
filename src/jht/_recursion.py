@@ -27,6 +27,7 @@ Library code does **not** enable x64; callers opt in per entry point via
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import NamedTuple
 
 import jax
@@ -255,32 +256,36 @@ def spin_weighted_lambda(x, m: int, spin: int, lmax: int) -> jax.Array:
 # (l==lmin(m)) steps are handled branch-free via per-(l,m) masks.
 # --------------------------------------------------------------------------- #
 class RecursionPlan(NamedTuple):
-    """Static (numpy) tables driving the vectorized all-m recursion for one spin.
+    """Recursion inputs for one spin: colatitudes ``x = cos(theta)``, ``spin``, ``lmax``.
 
-    Grids are ``(lmax+1, M)`` (l-major, M = lmax+1 orders); ``seed_log`` is
-    ``(M, n_theta)``; ``seed_sign`` is ``(M,)``.  ``spin`` and ``lmax`` are kept
-    for shape/spin bookkeeping by callers.
+    The per-(l, m) tables are built from these inside each kernel's trace by
+    :func:`_plan_arrays`; :func:`recursion_tables_np` is the NumPy reference.
     """
 
-    A: np.ndarray
-    B: np.ndarray
-    C: np.ndarray
-    pref: np.ndarray
-    seed_sign: np.ndarray
-    seed_log: np.ndarray
-    is_seed: np.ndarray
-    is_active: np.ndarray
+    x: np.ndarray
     spin: int
     lmax: int
 
 
 def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
-    """Precompute the static all-m recursion tables at colatitudes ``x=cos(theta)``.
+    """Plan for the vectorized all-m recursion at colatitudes ``x = cos(theta)``.
 
     ``spin`` is an integer with ``|spin| <= 3`` (on-grid uses 0, +-2; the off-grid
     NUFFT path also uses +-1, +-3 for pointing-derivative templates).  ``x`` is a
-    concrete ``(n_theta,)`` array of colatitudes (geometry is static), so the whole
-    plan is numpy and becomes compile-time constants inside the jitted transform.
+    concrete ``(n_theta,)`` array (geometry is static).
+    """
+    spin = int(spin)
+    if abs(spin) > 3:
+        raise NotImplementedError(f"spin={spin} unsupported (only |spin| <= 3)")
+    return RecursionPlan(np.asarray(x, dtype=np.float64), spin, int(lmax))
+
+
+def recursion_tables_np(x, spin: int, lmax: int):
+    """NumPy reference for the tables :func:`_plan_arrays` builds in-trace.
+
+    Returns ``(A, B, C, pref, seed_sign, seed_log, is_seed, is_active)``: grids are
+    ``(lmax+1, M)`` (l-major, ``M = lmax+1`` orders), ``seed_log`` is ``(M, n_theta)``
+    and ``seed_sign`` is ``(M,)``.
     """
     spin = int(spin)
     if abs(spin) > 3:
@@ -332,20 +337,101 @@ def build_recursion_plan(x, spin: int, lmax: int) -> RecursionPlan:
             seed_sign[m] = sign
             seed_log[m] = logabs
 
-    return RecursionPlan(A, B, C, pref, seed_sign, seed_log, is_seed, is_active, spin, lmax)
+    return A, B, C, pref, seed_sign, seed_log, is_seed, is_active
+
+
+@lru_cache(maxsize=None)
+def _seed_vectors_np(spin: int, lmax: int):
+    """Per-m seed constants as ``(M,)`` NumPy arrays: ``(sign, log_const, pow_cos, pow_sin)``.
+
+    ``log_const`` is the theta-independent part of the seed's log-magnitude;
+    ``pow_cos`` / ``pow_sin`` are the exponents of ``cos(theta/2)`` / ``sin(theta/2)``
+    (spin != 0 only; zero for spin 0). Same formulas as :func:`_sectoral_seed_logabs`
+    and :func:`_wigner_seed_np`.
+    """
+    M = lmax + 1
+    sign = np.empty(M, dtype=np.float64)
+    log_const = np.empty(M, dtype=np.float64)
+    pow_cos = np.zeros(M, dtype=np.int64)
+    pow_sin = np.zeros(M, dtype=np.int64)
+    lg = math.lgamma
+    for m in range(M):
+        if spin == 0:
+            sign[m] = 1.0 if (m % 2 == 0) else -1.0
+            log_const[m] = _sectoral_seed_logabs(m)
+            continue
+        Mo, Mp, lm = -m, spin, max(m, abs(spin))
+        k0 = max(0, Mo - Mp)
+        log_const[m] = 0.5 * (
+            lg(lm + Mo + 1) + lg(lm - Mo + 1) + lg(lm + Mp + 1) + lg(lm - Mp + 1)
+        ) - (lg(k0 + 1) + lg(lm + Mo - k0 + 1) + lg(lm - Mp - k0 + 1) + lg(k0 - Mo + Mp + 1))
+        sign[m] = -1.0 if (k0 % 2) else 1.0
+        pow_cos[m] = 2 * lm - 2 * k0 + Mo - Mp
+        pow_sin[m] = 2 * k0 - Mo + Mp
+    for arr in (sign, log_const, pow_cos, pow_sin):
+        arr.setflags(write=False)
+    return sign, log_const, pow_cos, pow_sin
 
 
 def _plan_arrays(plan: RecursionPlan):
-    """Convert the static plan grids to jnp once (compile-time constants)."""
-    return (
-        jnp.asarray(plan.A),
-        jnp.asarray(plan.B),
-        jnp.asarray(plan.C),
-        jnp.asarray(plan.pref),
-        jnp.asarray(plan.seed_sign),
-        jnp.asarray(plan.seed_log),
-        jnp.asarray(plan.is_seed),
-        jnp.asarray(plan.is_active),
+    """Build the recursion tables inside the trace (reference: :func:`recursion_tables_np`).
+
+    Only ``(M,)`` and ``(n_theta,)`` vectors enter as constants. The ``(lmax+1, M)`` and
+    ``(M, n_theta)`` grids are computed in-graph and passed through
+    ``optimization_barrier``, so XLA neither folds them back into embedded constants nor
+    keeps a copy per use site (jht#5). Every table matches the reference exactly except
+    ``seed_log``, which differs by <= 1 ulp under jit (XLA contracts multiply-add); through
+    the recursion that is ~5e-15 relative at lmax=192 and ~2e-13 at lmax=4000.
+    """
+    spin, lmax = plan.spin, plan.lmax
+    M = lmax + 1
+    x = plan.x
+    m_np = np.arange(M)
+    sign, log_const, pow_cos, pow_sin = _seed_vectors_np(spin, lmax)
+
+    ell = jnp.arange(M, dtype=jnp.float64)[:, None]  # (L1, 1); L1 == M
+    l_idx = jnp.arange(M)[:, None]
+    lmin = jnp.asarray(np.maximum(m_np, abs(spin)))[None, :]
+    is_active = l_idx >= lmin
+    is_seed = l_idx == lmin
+    seed_log = jnp.broadcast_to(jnp.asarray(log_const)[:, None], (M, x.shape[0]))
+
+    if spin == 0:
+        m = jnp.asarray(m_np, dtype=jnp.float64)[None, :]
+        rec = l_idx > jnp.asarray(m_np)[None, :]  # rows m+1 .. lmax
+        den = jnp.where(rec, (ell - m) * (ell + m), 1.0)
+        A = jnp.where(rec, jnp.sqrt((2.0 * ell - 1.0) * (2.0 * ell + 1.0) / den), 0.0)
+        bden = jnp.where(rec, (2.0 * ell - 3.0) * (ell - m) * (ell + m), 1.0)
+        B = jnp.where(rec, jnp.sqrt((2.0 * ell + 1.0) * ((ell - 1.0) ** 2 - m * m) / bden), 0.0)
+        C = jnp.zeros((M, M), dtype=jnp.float64)
+        pref = jnp.ones((M, M), dtype=jnp.float64)
+        with np.errstate(divide="ignore"):
+            log_sin = np.log(np.sqrt(np.clip(1.0 - x * x, 0.0, 1.0)))
+        m_col = jnp.asarray(m_np, dtype=jnp.float64)[:, None]
+        # m=0 has no sin factor (avoids 0 * log(0) at a pole)
+        seed_log = jnp.where(m_col == 0.0, seed_log, seed_log + m_col * jnp.asarray(log_sin)[None, :])
+    else:
+        par_m = np.where(m_np % 2 == 0, 1.0, -1.0)
+        norm_l = np.sqrt((2.0 * np.arange(M) + 1.0) / (4.0 * np.pi))  # NumPy factor: exact pref
+        pref = jnp.asarray(par_m)[None, :] * jnp.asarray(norm_l)[:, None]
+        valid = l_idx > lmin  # row l+1 holds the step from l, for l >= lmin(m)
+        e = jnp.where(valid, ell - 1.0, float(lmax + 4))  # off-mask filler keeps D > 0
+        mo = -jnp.asarray(m_np, dtype=jnp.float64)[None, :]  # M = -m
+        mp = float(spin)
+        D = e * jnp.sqrt(((e + 1.0) ** 2 - mo * mo) * ((e + 1.0) ** 2 - mp * mp))
+        A = jnp.where(valid, (2.0 * e + 1.0) * e * (e + 1.0) / D, 0.0)
+        C = jnp.where(valid, -(2.0 * e + 1.0) * mo * mp / D, 0.0)
+        B = jnp.where(valid, (e + 1.0) * jnp.sqrt((e * e - mo * mo) * (e * e - mp * mp)) / D, 0.0)
+        with np.errstate(divide="ignore"):
+            log_cos_h = np.log(np.sqrt(np.clip((1.0 + x) / 2.0, 0.0, 1.0)))
+            log_sin_h = np.log(np.sqrt(np.clip((1.0 - x) / 2.0, 0.0, 1.0)))
+        pc = jnp.asarray(pow_cos)[:, None]
+        ps = jnp.asarray(pow_sin)[:, None]
+        seed_log = jnp.where(pc > 0, seed_log + pc * jnp.asarray(log_cos_h)[None, :], seed_log)
+        seed_log = jnp.where(ps > 0, seed_log + ps * jnp.asarray(log_sin_h)[None, :], seed_log)
+
+    return jax.lax.optimization_barrier(
+        (A, B, C, pref, jnp.asarray(sign), seed_log, is_seed, is_active)
     )
 
 
