@@ -19,7 +19,7 @@ dedicated pixi environment (`pyproject.toml`):
 
 ```toml
 [tool.pixi.feature.gpu]
-platforms = ["linux-64"]                 # no CUDA on osx-arm64
+platforms = ["linux-64", "linux-aarch64"]  # no CUDA on osx-arm64
 [tool.pixi.feature.gpu.system-requirements]
 cuda = "12"
 [tool.pixi.feature.gpu.dependencies]
@@ -31,7 +31,8 @@ gpu = { features = ["gpu"] }
 ```
 
 Notes:
-- **linux-64 only.** The `gpu` environment does not exist on osx-arm64.
+- **linux-64 and linux-aarch64** (x86 NVIDIA nodes and Grace Hopper / Grace Blackwell).
+  The `gpu` environment does not exist on osx-arm64.
 - **python 3.13.** conda-forge ships the CUDA `jaxlib` for py312/py313 but not
   py314, so the `gpu` env pins 3.13 while the default CPU env stays on 3.14.
   Numerics are identical — it is pure JAX.
