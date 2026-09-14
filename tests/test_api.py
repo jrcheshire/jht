@@ -25,7 +25,7 @@ EXPECTED = {
     "wiener", "constrained_realization",
     "synthesis_real", "analysis_real",
     "synthesis_general_real", "adjoint_synthesis_general_real",
-    "bandpower",
+    "bandpower", "synthesis_vjp", "adjoint_synthesis_vjp",
     "alm_to_real", "real_to_alm", "n_dof", "alm_size", "alm_metric_weight",
     "enable_compilation_cache",
     "set_azimuth_fft_mode", "get_azimuth_fft_mode", "enable_looped_fft",
@@ -67,6 +67,8 @@ def test_reexports_are_the_real_objects():
     assert jht.synthesis_general_real is diff.synthesis_general_real
     assert jht.adjoint_synthesis_general_real is diff.adjoint_synthesis_general_real
     assert jht.bandpower is diff.bandpower
+    assert jht.synthesis_vjp is diff.synthesis_vjp
+    assert jht.adjoint_synthesis_vjp is diff.adjoint_synthesis_vjp
     assert jht.enable_compilation_cache is _cache.enable_compilation_cache
     assert jht.set_azimuth_fft_mode is _azimuth.set_azimuth_fft_mode
     assert jht.get_azimuth_fft_mode is _azimuth.get_azimuth_fft_mode

@@ -36,10 +36,12 @@ from ._azimuth import enable_looped_fft, get_azimuth_fft_mode, set_azimuth_fft_m
 from ._cache import enable_compilation_cache
 from .diff import (
     adjoint_synthesis_general_real,
+    adjoint_synthesis_vjp,
     analysis_real,
     bandpower,
     synthesis_general_real,
     synthesis_real,
+    synthesis_vjp,
 )
 from .healpix import (
     adjoint_synthesis,
@@ -89,6 +91,9 @@ __all__ = [
     "synthesis_general_real",  # S_g o T^-1 : R^n -> field at arbitrary points
     "adjoint_synthesis_general_real",  # T o S_g^T : field -> R^n (exact transpose)
     "bandpower",  # angular auto-power C_ell
+    # reverse-only transforms: native AD's gradients without the recursion tape (no jvp)
+    "synthesis_vjp",
+    "adjoint_synthesis_vjp",
     # real-DOF isometry T
     "alm_to_real",
     "real_to_alm",

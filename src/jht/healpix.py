@@ -187,6 +187,19 @@ class _Prepared(NamedTuple):
     adj: Callable[[jax.Array], jax.Array]
 
 
+def _opaque(fn):
+    """Wrap a transform kernel in a save-nothing ``jax.checkpoint`` (jht#4).
+
+    Under ``grad`` of a scanned body (e.g. ``lax.map`` over sims), JAX partial-evaluates
+    the body and hoists work that depends only on loop constants out of the loop. The
+    Legendre recursion depends only on the grid, so without a boundary its stacked per-l
+    output ``(lmax+1, lmax+1, 2 nside)`` becomes a loop constant. The checkpoint keeps
+    each kernel one unit, so the backward recomputes it per transform instead. Forward
+    mode is unaffected.
+    """
+    return jax.checkpoint(fn, policy=jax.checkpoint_policies.nothing_saveable)
+
+
 @lru_cache(maxsize=None)
 def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _Prepared:
     # ``fft_mode`` is part of the cache key: :func:`synthesis` / :func:`adjoint_synthesis`
@@ -315,7 +328,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
             Vn, Vs = fold_south(V)
             return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs))
 
-        return _Prepared(synth, adj)
+        return _Prepared(_opaque(synth), _opaque(adj))
 
     plan_p = build_recursion_plan(geo.z[:t_half], 2, lmax)
     plan_m = build_recursion_plan(geo.z[:t_half], -2, lmax)
@@ -367,7 +380,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         aB = 0.5 * (1j * p2 - 1j * m2)
         return jnp.stack([dense_to_tri(aE), dense_to_tri(aB)])
 
-    return _Prepared(synth2, adj2)
+    return _Prepared(_opaque(synth2), _opaque(adj2))
 
 
 # --------------------------------------------------------------------------- #
