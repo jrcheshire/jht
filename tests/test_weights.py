@@ -55,7 +55,7 @@ def test_m0_quadrature_exact_to_2nside():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("nside", [1024, 2048, 4096])
+@pytest.mark.parametrize("nside", [1024, 2048, pytest.param(4096, marks=pytest.mark.heavy)])
 def test_m0_quadrature_exact_high_nside(nside):
     """Weight solve stays well-conditioned (cond ~ 2*nside) and m=0-exact (~1e-16)
     to nside=4096 -- resolves the docs/accuracy.md 'behavior at nside=2048 is a

@@ -117,17 +117,31 @@ checked **empirically against both oracles** (healpy ≡ ducc on the transform s
 ## Differentiability
 
 The on-grid SHT is **linear in aₗₘ** and differentiates cleanly under JAX's
-**native** autodiff. jht registers **no** custom VJP/JVP rule.
+**native** autodiff, which is the default. An opt-in reverse-only path exists for
+memory (below).
 
 - **Mechanism = native AD.** `jax.grad` / `vjp` / `jacrev` / `jacfwd` all work and
-  are numerically correct. A `custom_vjp` was evaluated and **rejected**: it
+  are numerically correct. A `custom_vjp` is **not** the default: it
   *blocks forward-mode AD* (so `jacfwd` — and hence `jacfwd ≡ jacrev` — fails on
   `synthesis` and everything downstream), and the only mechanism that both keeps
   forward mode and routes reverse through the hand kernel needs JAX's internal
   `jax.core.Primitive` + manual MLIR lowering (already removed/moved in jax 0.9.2)
-  — fragile, against the pure-JAX dependency-control point. Native AD avoids all
-  of it. Forward scatters carry `unique_indices=True` (the indices are genuinely
-  unique) to keep the kernels transpose-friendly; forward numerics are unchanged.
+  — fragile, against the pure-JAX dependency-control point. Forward scatters carry
+  `unique_indices=True` (the indices are genuinely unique) to keep the kernels
+  transpose-friendly; forward numerics are unchanged.
+- **Reverse-mode memory (GitHub #4).** Native AD through the recursion `lax.scan`
+  stores its per-l output as residuals: one `(lmax+1, lmax+1, 2·nside)` table per
+  transform (~nside³ bytes) during the backward. Two measures:
+  - every on-grid kernel runs under a save-nothing `jax.checkpoint`, so under `grad` of
+    a scanned body JAX cannot hoist the grid-only recursion out of the loop as a stacked
+    constant. Forward mode is unaffected;
+  - `jht.diff.synthesis_vjp` / `adjoint_synthesis_vjp` carry a transpose-pair
+    `custom_vjp` (each VJP is one call to the partner kernel) with native AD's exact
+    cotangents and no recursion tape. They block forward mode; use them for `grad` at
+    high nside.
+- **Static tables are built in-trace (GitHub #5)** behind `optimization_barrier`,
+  not closed over as NumPy arrays, so a program with many transforms does not embed a
+  copy of each table per use as XLA constant data.
 - **Two distinct operators, kept separate.** `adjoint_synthesis = Sᵀ = Yᵀ` is the
   exact, weight-free **strict transpose** (the operator seam / the operator a CG
   solve needs); `analysis` (`A = SᵀW`, weighted + iterative, aka `map2alm`) is the

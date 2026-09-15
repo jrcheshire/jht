@@ -66,7 +66,7 @@ packages = ["src/jht"]
 # --- Pixi (standard env tool) -------------------------------------------------
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64"]
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
 
 [tool.pixi.pypi-dependencies]
 jaxht = { path = ".", editable = true }   # the editable self-install (== [project].name)
@@ -95,14 +95,15 @@ format = "ruff format"
 typecheck = "mypy src/jht"
 
 # --- GPU environment (Phase 3; CUDA build of jaxlib for an NVIDIA box, e.g. Cannon) ---
-# linux-64 only (no CUDA on osx-arm64). conda-forge ships the CUDA jaxlib for
-# py312/py313 but NOT py314, so this env pins python 3.13 (the default CPU env
-# stays py314 -- numerics are identical, it is pure JAX). Solve it from anywhere
-# (`pixi install` re-solves all platforms); RUN it on the GPU box:
+# linux-64 and linux-aarch64 (e.g. Grace Hopper / Grace Blackwell); no CUDA on osx-arm64.
+# conda-forge ships the CUDA jaxlib for py312/py313 but NOT py314, so this env pins
+# python 3.13 (the default CPU env stays py314 -- numerics are identical, it is pure
+# JAX). Solve it from anywhere (`pixi install` re-solves all platforms); RUN it on the
+# GPU box:
 #   pixi run -e gpu python scripts/gpu_check.py
 # See docs/gpu.md. x64 is caller-opt-in (set jax_enable_x64 before any array).
 [tool.pixi.feature.gpu]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [tool.pixi.feature.gpu.system-requirements]
 cuda = "12"
@@ -128,4 +129,5 @@ ignore_missing_imports = true
 # still run them, so no coverage is lost -- only rescheduled.
 markers = [
   "slow: heavy oracle / sweep test; run by the full suite + nightly, not the fast gate",
+  "heavy: peak memory beyond a GitHub-hosted runner (>3 GB); run locally (`pixi run test`), never in CI",
 ]

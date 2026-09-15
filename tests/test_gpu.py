@@ -6,9 +6,9 @@ CPU result to ~machine precision -- it is the same XLA program. This module make
 that a suite gate; it **skips cleanly when no GPU is visible** (osx-arm64 dev,
 CPU CI), and runs for real under ``pixi run -e gpu test`` on an NVIDIA box.
 
-Parity mechanism: ``jht.healpix._prepare`` is ``lru_cache``-d and closes over
-device-resident constants placed at first-call time, so we clear the caches and
-rebuild under ``jax.default_device(dev)`` to genuinely run on each device.
+Parity mechanism: ``jht.healpix._prepare`` is ``lru_cache``-d (its large tables are
+built inside each kernel's trace), so we clear the caches and rebuild under
+``jax.default_device(dev)`` to genuinely run on each device.
 """
 
 from __future__ import annotations

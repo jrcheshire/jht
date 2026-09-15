@@ -4,6 +4,34 @@ All notable changes to jht are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Reverse-only transforms** `jht.synthesis_vjp` / `jht.adjoint_synthesis_vjp` (in
+  `jht.diff`): the same values and cotangents as native AD via a transpose-pair
+  `custom_vjp`, where each VJP is one call to the partner kernel. Native reverse-mode AD
+  through the Legendre-recursion `lax.scan` keeps one `(lmax+1, lmax+1, 2·nside)` table
+  per transform for the backward (~nside³ bytes); these keep none. They block forward
+  mode (`jvp` / `jacfwd` raise), so the plain transforms stay the default (GitHub #4).
+
+### Changed
+- **Static tables are built in-trace.** The recursion coefficients and seeds, the
+  azimuth phase and the looped-mode cap gather/mask are computed inside each kernel's
+  trace behind `optimization_barrier` instead of being closed over as NumPy arrays.
+  Closed-over arrays are embedded as XLA constants with a copy per use site, and the
+  CUDA driver loads that constant data outside JAX's memory pool, so SHT-heavy programs
+  failed to load at high nside (`Failed to load in-memory CUBIN ... OUT_OF_MEMORY`,
+  GitHub #5). In a downstream design gradient the optimized graph's constant data fell
+  from 53.3 to 5.4 MB at nside=64 and from 209.8 to 19.1 MB at nside=128.
+  `RecursionPlan` / `CapPlan` now hold only small vectors; `_recursion.recursion_tables_np`
+  is the NumPy reference.
+  - Numerics: every table matches the reference exactly except `seed_log` (≤1 ulp under
+    jit, where XLA contracts multiply-add) and the phase (≤1 ulp, XLA vs libm `cos`/`sin`).
+    Transforms move by ~5e-15 relative at lmax=192 and ~2e-13 at lmax=4000 versus 0.2.0.
+- **Save-nothing checkpoint around each on-grid kernel**, on by default: under `grad` of a
+  scanned body, JAX can no longer hoist the grid-only recursion out of the loop as a
+  stacked constant. Forward mode is unaffected; the backward recomputes each transform.
+
 ## [0.2.0] - 2026-06-30
 
 ### Added
