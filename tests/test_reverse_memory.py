@@ -1,7 +1,8 @@
 """Reverse-mode memory of the on-grid transforms (GitHub #4).
 
 * ``synthesis_vjp`` / ``adjoint_synthesis_vjp`` return native AD's values and
-  cotangents exactly (non-physical inputs included) and block forward mode;
+  cotangents to ``ALG_TOL`` (non-physical inputs included; not bitwise, since GPU
+  compilation can fuse the two graphs differently) and block forward mode;
 * their gradient graphs keep no ``(lmax+1, lmax+1, 2 nside)`` recursion table, also
   inside a scanned body;
 * the default save-nothing checkpoint around each kernel keeps forward mode working
@@ -52,7 +53,7 @@ def test_synthesis_vjp_matches_native(spin):
     a, v = _rand_alm(rng, spin), _rand_map(rng, spin)
     y_w, vjp_w = jax.vjp(lambda z: synthesis_vjp(z, NSIDE, LMAX, spin), a)
     y_n, vjp_n = jax.vjp(lambda z: synthesis(z, NSIDE, LMAX, spin), a)
-    assert np.array_equal(np.asarray(y_w), np.asarray(y_n))
+    assert _rel(y_w, y_n) <= ALG_TOL
     assert _rel(vjp_w(v)[0], vjp_n(v)[0]) <= ALG_TOL
 
 
@@ -62,7 +63,7 @@ def test_adjoint_synthesis_vjp_matches_native(spin):
     m, c = _rand_map(rng, spin), _rand_alm(rng, spin)
     y_w, vjp_w = jax.vjp(lambda z: adjoint_synthesis_vjp(z, NSIDE, LMAX, spin), m)
     y_n, vjp_n = jax.vjp(lambda z: adjoint_synthesis(z, NSIDE, LMAX, spin), m)
-    assert np.array_equal(np.asarray(y_w), np.asarray(y_n))
+    assert _rel(y_w, y_n) <= ALG_TOL
     assert _rel(vjp_w(c)[0], vjp_n(c)[0]) <= ALG_TOL
 
 
