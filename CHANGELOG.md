@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-14
+
 ### Added
 - **Reverse-only transforms** `jht.synthesis_vjp` / `jht.adjoint_synthesis_vjp` (in
   `jht.diff`): the same values and cotangents as native AD via a transpose-pair
