@@ -1,21 +1,13 @@
-# GPU (CUDA) — environment, contract, harness
+# GPU (CUDA) — environment, accuracy, harness
 
-jht is pure JAX, so the on-grid transforms run on a CUDA GPU with **no code
-change** — the static recursion plan is host-side numpy/fp64, and the `jit`-ed
-contraction + ring FFTs run on whatever device JAX defaults to. This note pins
-the install story, the one footgun (x64), the accuracy tier, and how to validate
-on hardware.
-
-**Status:** measured on A100 (MIG) slices and a V100 — see "Measured GPU
-performance" below. fp64 GPU==CPU parity holds across the supported regime
-**including nside=2048** (synth and `map2alm` relerr ~1e-13). All of forward/adjoint
-synthesis, `map2alm`, and the off-grid path run on GPU. Development is on osx-arm64,
-which has no fp64 GPU (see "Mac-local tier" below).
+jht is pure JAX, so every transform (on-grid, `analysis`, off-grid, masked) runs on a
+CUDA GPU with no code change: the static recursion plan is host-side NumPy, and the
+jitted contraction and ring FFTs run on JAX's default device.
 
 ## The `gpu` pixi environment
 
-conda-forge `jaxlib` defaults to a CPU build; the CUDA build is selected in a
-dedicated pixi environment (`pyproject.toml`):
+conda-forge `jaxlib` defaults to a CPU build; the CUDA build lives in a dedicated pixi
+environment (`pyproject.toml`):
 
 ```toml
 [tool.pixi.feature.gpu]
@@ -23,203 +15,105 @@ platforms = ["linux-64", "linux-aarch64"]  # no CUDA on osx-arm64
 [tool.pixi.feature.gpu.system-requirements]
 cuda = "12"
 [tool.pixi.feature.gpu.dependencies]
-python = "3.13.*"                        # conda-forge CUDA jaxlib is py312/py313, NOT py314
+python = "3.13.*"                        # conda-forge CUDA jaxlib is py312/py313, not py314
 jaxlib = { build = "cuda*" }
 cuda-version = ">=12.9,<13"
 [tool.pixi.environments]
 gpu = { features = ["gpu"] }
 ```
 
-Notes:
-- **linux-64 and linux-aarch64** (x86 NVIDIA nodes and Grace Hopper / Grace Blackwell).
-  The `gpu` environment does not exist on osx-arm64.
-- **python 3.13.** conda-forge ships the CUDA `jaxlib` for py312/py313 but not
-  py314, so the `gpu` env pins 3.13 while the default CPU env stays on 3.14.
-  Numerics are identical — it is pure JAX.
-- The env pulls the CUDA runtime (cudart / cupti / nvrtc / nvtx, CUDA 12.9) plus
-  the usual validation oracles (healpy, ducc0) so the gated suite runs there too.
+- linux-64 and linux-aarch64 (x86 NVIDIA nodes, Grace Hopper / Grace Blackwell).
+- Python 3.13, because conda-forge ships the CUDA `jaxlib` for py312/py313 only. The
+  default CPU env uses 3.14; numerics are identical.
+- The env includes the CUDA 12.9 runtime and the validation oracles (healpy, ducc0), so
+  the gated suite runs there too. The driver only needs to be forward-compatible with
+  CUDA 12.9.
 
-The lock is solved for all platforms from anywhere (`pixi install` re-solves;
-a GPU is **not** needed to produce/commit `pixi.lock`). You only need the GPU to
-*run* the env:
+The lock solves for all platforms from any machine. To install on a cluster from a
+node without a GPU, mock the CUDA driver for the solve; the real driver is detected at
+run time:
 
 ```bash
-# on the NVIDIA box:
-pixi run -e gpu python scripts/gpu_check.py
-pixi run -e gpu test                       # the full suite, incl. the GPU parity gate
+CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu      # once, on any networked node
+pixi run --frozen -e gpu python scripts/gpu_check.py
+pixi run --frozen -e gpu test                     # full suite incl. the GPU parity gate
 ```
 
-## The x64 footgun (read this)
+## float64 must be enabled
 
-Library code never touches the global JAX config — float64 is opt-in **per entry
-point**. On GPU the failure mode is silent: without x64 every array is float32
-and you drop from the ~1e-13 tier to ~1e-3 or worse. Set it **before any array is
-created**:
+Library code never touches global JAX config; float64 is opt-in **per entry point**. On
+GPU the failure is silent: without x64 every array is float32 and accuracy drops from
+~1e-13 to ~1e-3 or worse. Enable it before any array is created:
 
 ```python
 import jax
-jax.config.update("jax_enable_x64", True)   # FIRST, before importing/allocating
+jax.config.update("jax_enable_x64", True)
 ```
 
-## Accuracy tier on CUDA
+## Accuracy on CUDA
 
-Same contract as CPU: float64, weighted + iterated → ~1e-13 on band-limited
-maps; bare floor ~1e-3. The GPU parity gate asserts **GPU == CPU to ~1e-12** in
-fp64 (it is the same XLA program). Caveat: fp64 throughput is throttled on many
-NVIDIA cards (consumer/older parts especially) — fp64 *correctness* is unaffected,
-but the *speedup* depends on the card's fp64:fp32 ratio. This is the production
-GPU tier.
+Same contract as CPU (`docs/accuracy.md`). The GPU parity gate asserts GPU == CPU to
+~1e-12 in float64; it is the same XLA program. fp64 throughput depends on the card's
+fp64:fp32 ratio (throttled on consumer parts); correctness does not.
 
-**Mac-local tier (out of scope here).** Apple Silicon GPUs have no fp64, so any
-Mac-GPU path (MLX) is a separate lower-accuracy fp32 tier — a future
-local-dev convenience, not this CUDA contract. (Internal note:
-`jht-mac-gpu-fp32`.)
+## Harness
 
-## The harness — `scripts/gpu_check.py`
+- **`scripts/gpu_check.py`:** reports devices, checks float64 CPU-vs-GPU parity to
+  ~1e-12 (skipped without a GPU), and times `synthesis` / `adjoint_synthesis` /
+  `map2alm`, including a `vmap` batch, plus peak memory. On a CPU-only machine it runs
+  the self-consistency and timing parts. `tests/test_gpu.py` makes the parity check
+  part of the suite and skips cleanly without a GPU.
+- **`scripts/gpu_diagnostic.py`:** a fuller characterisation from a single job. It
+  measures:
+  - GPU-vs-CPU speedup, and the fp64/fp32 throttle (fp32 is timed for throughput
+    only);
+  - on-device float64 parity;
+  - the memory ceiling per `(nside, lmax, spin)`;
+  - `vmap` throughput vs batch size;
+  - off-grid NUFFT cost at production scale, and the pointing-gradient cost.
 
-Across the supported regime (nside / lmax / spin) it:
-1. reports the active device(s);
-2. checks **fp64 parity** between the CPU and GPU backends (`jax.device_put` to
-   each) to ~1e-12 — skipped if no GPU is visible;
-3. times `synthesis` / `adjoint_synthesis` / `map2alm`, including a
-   `vmap`-over-realizations batch;
-4. reports peak memory.
+  How it runs:
+  - **Isolation:** each point runs in a fresh subprocess, which gives a clean
+    per-point peak (`peak_bytes_in_use` is cumulative) and confines an OOM to that
+    point.
+  - **Sizing:** heavy points are gated by a predicted footprint against the
+    detected memory or `--limit-gb`, so the ladder fills whatever card or MIG
+    slice it lands on.
+  - **Wall time:** `--max-wall` bounds it, and every finished point is written to
+    JSONL as it goes.
 
-On a CPU-only machine it still runs (self-consistency + timing) so it is never
-dead code; on the GPU box it produces the parity + speedup numbers. The pytest
-gate `tests/test_gpu.py` makes the parity assertion part of the suite and
-`pytest.skip`s cleanly when no GPU is present.
+  ```bash
+  python scripts/gpu_diagnostic.py --dry-run --limit-gb 10        # preview the ladder
+  pixi run -e gpu python scripts/gpu_diagnostic.py --max-wall 1800 --out run.jsonl
+  ```
 
-## The single-slot diagnostic — `scripts/gpu_diagnostic.py`
+  On a preemptible batch partition, set `XLA_PYTHON_CLIENT_PREALLOCATE=false` for
+  honest per-point memory and log `nvidia-smi -L` to tie results to the card.
 
-`gpu_check.py` is the parity gate plus a quick ladder. For the **one** moderate-scale
-`gpu_requeue` slot the GPU numbers have been waiting on, use the purpose-built
-`scripts/gpu_diagnostic.py` — designed to extract everything from a single job so a
-second is not needed:
+## Measured performance
 
-- GPU-vs-CPU **speedup** and the card's **fp64/fp32 throttle** factor (the same op
-  timed in both dtypes — fp32 is *throughput-only*, never an accuracy claim);
-- fp64 **GPU==CPU parity** measured on-device;
-- the on-device **memory ceiling** per `(nside, lmax, spin)`, including nside=2048;
-- **vmap throughput** vs batch size (the forecast-sweep per-realization knee);
-- **off-grid NUFFT at production scale** (lmax~1000, N up to 1e6), measured vs
-  predicted footprint (the `(Npts, W, W)` stencil — see `docs/offgrid.md`);
-- the off-grid **pointing-gradient** cost (the ducc-`NotImplementedError`
-  capability); compile time, reported separately everywhere.
-
-Each measurement point runs in a **fresh subprocess**: this gives a clean per-point
-device peak (`peak_bytes_in_use` is a cumulative counter), survives per-point OOM
-(one OOM never wastes the slot), and toggles x64 per point.
-
-`gpu_requeue` hands you *whatever is free* — most often a **10–20 GB A100 MIG
-slice**, occasionally a whole 80 GB card. So the ladder is **memory-driven**: each
-heavy point is gated by a predicted device footprint against the detected (or
-`--limit-gb`) memory, and the run fills whatever it lands on — a MIG slice still
-reaches the production off-grid point (lmax≈1000), which is memory-light
-(`grid + Npts·W²`), even when it cannot reach nside=2048 on-grid. The per-point OOM
-guard is the true boundary; `--max-wall` makes a short slot still save every
-completed point; output is a human table + machine-readable JSONL (re-plot without
-a second job) + a derived summary.
-
-```bash
-# preview what a given slice would run, from anywhere (laptop is fine):
-python scripts/gpu_diagnostic.py --dry-run --limit-gb 10      # a 10 GB MIG slice
-python scripts/gpu_diagnostic.py --dry-run --limit-gb 80      # a full A100
-# the run on the box (auto-detects the slice; cap total wall time for a short slot):
-pixi run -e gpu python scripts/gpu_diagnostic.py --max-wall 1800 --out cannon_run.jsonl
-```
-
-On a CPU-only box it runs a reduced self-test exercising every path, so it can be
-smoke-tested before a GPU run.
-
-### On a SLURM cluster (batch only) — `scripts/submit_gpu_diagnostic.sh`
-
-Where there are no interactive GPU nodes, run it via SLURM. The submit script
-targets a preemptible GPU partition (`--gres=gpu:1`; edit `--account` / `--partition`
-for your cluster) and inherits all the single-slot design above: it auto-sizes to
-whatever MIG slice / card it lands on,
-`--max-wall`-bounds itself, and runs off-grid before vmap so a preempted slot loses
-the least. It logs `nvidia-smi -L` so the result is tied to the exact slice, and
-sets `XLA_PYTHON_CLIENT_PREALLOCATE=false` for honest per-point device memory.
-
-```bash
-# ONCE from any networked CPU node (a login or dev node) --
-# it has no GPU, so mock the CUDA driver virtual package (__cuda) for the solve;
-# the real driver is detected at runtime on the GPU node. The env lands in ./.pixi
-# on global home, which the gpu_requeue node reads; the submit script then runs it
-# with `pixi run --frozen` (no re-solve / no network on the GPU node).
-cd ~/jht && CONDA_OVERRIDE_CUDA=12.9 pixi install -e gpu
-# submit (gpu_requeue is preemptible -- the per-jobid JSONL is the protection):
-sbatch scripts/submit_gpu_diagnostic.sh
-# full ladder on a slow MIG (bump --time AND MAX_WALL together):
-MAX_WALL=6600 sbatch --time=02:30:00 scripts/submit_gpu_diagnostic.sh
-```
-
-Outputs land in `runs/gpu-diag/` (gitignored): `slurm_<jobid>.out` (human table) and
-`diag_<jobid>.jsonl` (copy back here to analyze).
-
-## Measured GPU performance
-
-Measured on A100 MIG slices (10–25 GB) and a V100-16GB, fp64
+A100 (whole card and 10–25 GB MIG slices) and V100-16GB, float64
 (`scripts/gpu_diagnostic.py`, `scripts/profile_adjoint.py`):
 
-- **fp64 GPU==CPU parity:** relerr 1e-14 … 1e-13 across nside 256–1024, spin 0/2 —
-  the ~1e-12 contract holds on hardware.
-- **Forward synthesis:** 14–60× the (8-core) CPU; **fp64/fp32 ≈ 2.2×** (clean A100
-  fp64 — no consumer-card throttle on these parts).
-- **Adjoint / `map2alm`:** the dense→triangular alm packing was a **scatter**
-  (`at[idx].set(mode="drop")`), which is catastrophically slow in fp64 on GPU
-  (~38000× a gather; nside=512 fp64 it was 3.8 s of a 4.0 s adjoint). Fixed by
-  packing via a **gather** (`dense_to_tri`, mirroring the forward `tri_to_dense`):
-  adjoint **4041 → 187 ms** at nside=512 (~21×), so `map2alm` drops ~16 s → ~1.3 s.
-  The on-grid analysis / Wiener adjoint path is now usable on GPU. *(Lesson:
-  never `at[idx].set` for fp64/complex alm packing on GPU — use a gather.)*
-- **Off-grid:** correct and **memory-light** — lmax=1000, N=1e6 peaks ~1.1 GB, well
-  under the predicted ceiling (XLA fuses the `(Npts,W,W)` stencil rather than
-  materializing it). The **pointing gradient costs ~1× a forward** (the
-  ducc-`NotImplementedError` capability, cheap on GPU). The adjoint shares the
-  gather fix.
-- **Batched (`vmap`) synthesis:** per-realization time falls with batch (the
-  forecast-sweep knee), e.g. ~286 → ~168 ms/realization at nside=512 (batch 1→4).
+- **Parity:** GPU == CPU to 1e-14–1e-13 across nside 256–2048, spin 0/2.
+- **Synthesis:** 14–60× an 8-core CPU; fp64/fp32 ≈ 2.2× on these parts.
+- **Adjoint:** 187 ms at nside=512; a full `map2alm` (niter=3) ~1.3 s there.
+- **Off-grid:**
+  - the forward is recursion-bound, ~0.5–0.9 s at lmax=1000 and independent of the
+    number of points;
+  - lmax=1000 with 10⁶ points peaks at ~1.1 GB, because XLA fuses the `(Npts, W, W)`
+    stencil rather than materializing it;
+  - the pointing gradient costs ~1× a forward.
+- **Batched synthesis:** per-realization time falls with batch size, e.g. 286 → 168 ms
+  at nside=512 (batch 1 → 4).
+- **nside=2048:** synthesis and `map2alm` compile and run on a 20 GB MIG slice and
+  match CPU to ~1e-13 (lmax=1000).
+  - The first compile is multi-minute (~458 s), 93% of it the per-ring-length FFT
+    unroll (≈ nside distinct kernels).
+  - `jht.enable_compilation_cache(dir)` pays it once across processes.
+  - `jht.set_azimuth_fft_mode("looped")` collapses the cap FFTs to O(1) kernels: ~6–7×
+    faster compile for an ~11–15% runtime cost. See `docs/performance.md`.
 
-### Scatter→gather: off-grid forward and nside=2048
-
-The same lesson as the adjoint fix above (fp64/complex scatters are catastrophic on
-GPU) applies to two more paths. Both reworks are **bit-identical** (gather of the
-same values, gated by the full CPU suite + GPU==CPU parity):
-
-- **Off-grid *forward* synthesis — fixed (~40×).** A stage profiler
-  (`scripts/profile_offgrid_forward.py`) pinned the N-independent ~35 s to the
-  `nufft2d2` oversampled-grid build, a fp64/complex `C.at[kbins,mbins].set(c)` **scatter**
-  = 97% of the forward (34.5 s of 35 s at lmax=1000). Replaced by a precomputed
-  inverse-index **gather** (`NufftPlan.fill_src/fill_mask`): the grid build drops 34.5 s
-  → ~1.4 ms, so the forward is now recursion-bound (~0.5–0.9 s). (The two
-  `synth_contract` channels are deduplicated for spin-0.)
-- **nside=2048 now compiles and matches CPU.** The per-ring-group output writes
-  (`out.at[pix].set` / `V.at[:,ring].set`) were a **~nside-way unrolled fp64 scatter**;
-  fused with the recursion, the full `jit_synth` module exceeded `ptxas` (exit 9) at
-  nside=2048. Hoisting those writes out of the ring loop into a **single combined gather**
-  (`pix_to_buf` / `ring_to_col` static permutations; the per-length ring FFTs stay — a
-  length-N HEALPix ring needs an exact length-N FFT, so they can't be padded to a common
-  length) shrinks the module enough to compile. Measured at nside=2048, lmax=1000 on a
-  20 GB A100 MIG: synth and `map2alm` **compile, run, and match CPU to ~1e-13** (synth
-  4.4e-13 / 1.4e-14 spin-0; 3.1e-13 / 2.0e-14 spin-2). Runtime fits in a ~20 GB slice.
-  The first compile is multi-minute and structural — ~458 s at nside=2048, **93% the
-  per-length FFT unroll** (`n_groups` = nside distinct FFT kernels; the recursion is
-  ~1.6 s). Two levers: `jht.enable_compilation_cache(dir)` opts in to JAX's persistent
-  on-disk cache so it is paid **once ever**, not per run; and
-  `jht.set_azimuth_fft_mode("looped")` **collapses those ~nside cap FFT kernels to O(1)**
-  via a common-length chirp-z `lax.scan` (belt kept native), which is what keeps an
-  SHT-heavy differentiable graph under XLA's 2 GB executable cap — ~6–7× faster compile
-  for an ~11–15% steady-runtime tax (CPU-measured). See `docs/performance.md`
-  "Compile time".
-
-## Cluster / CUDA notes
-
-- The env targets CUDA 12.9 runtime; the driver only needs to be
-  forward-compatible. Confirmed working on A100 / V100 nodes via
-  `pixi run --frozen -e gpu`.
-- fp64 throttle on these parts is ≈ 2.2× (A100 / V100; good fp64 silicon).
-- nside=2048 was a `ptxas` **compile** ceiling (not a memory one), fixed by the
-  combined-gather de-unroll (see "Measured GPU performance"); a 20 GB MIG
-  (`--gres=gpu:nvidia_a100_3g.20gb:1`) holds nside=2048 synth + `map2alm`.
+**Implementation rule:** the kernels pack, unpack and assemble with **gathers**, never
+`at[idx].set` scatters. An fp64/complex scatter is ~10⁴× slower than the equivalent
+gather on GPU, and a ~nside-way unrolled scatter overflows `ptxas` at nside=2048.

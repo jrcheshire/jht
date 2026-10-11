@@ -35,21 +35,23 @@ in ``[0,1]``):
    bias-for-variance trade), and :func:`constrained_realization` draws posterior
    samples for the full MUSE gradient.  Both run CG in **prior-whitened**
    coordinates ``y = P^-1 x``, ``P = diag(sqrt(Cl))``: the operator becomes
-   ``P A_x P + I`` (eigenvalues >= 1, well conditioned), and zero-power
-   multipoles (``Cl = 0``, e.g. monopole/dipole) have ``P = 0`` exactly -- they
-   are pinned to 0 rather than carried as a huge finite ``1/Cl``, which would
-   otherwise wreck the CG relative-residual stopping rule through the sampler's
-   ``sqrt(1/Cl)``-scaled noise source.
+   ``P A_x P + I`` (eigenvalues >= 1), and zero-power multipoles (``Cl = 0``,
+   e.g. monopole/dipole) have ``P = 0`` exactly -- they are pinned to 0 rather
+   than carried as a huge finite ``1/Cl``, which would break the CG
+   relative-residual stopping rule.  :func:`wiener_preconditioner` builds an
+   optional preconditioner for this system, and ``return_info=True`` reports the
+   iteration count and final residual (:class:`SolveInfo`).
 
-The inner-product subtlety (the bk-jax ``2*conj`` gotcha): ``S``/``S^T`` are
+The inner-product subtlety (the ``2*conj`` convention): ``S``/``S^T`` are
 adjoint in the ``(2 - delta_{m0})``-weighted a_lm inner product, not the
 Euclidean one (see :func:`jht.healpix.adjoint_synthesis`).  So ``A`` is
-Hermitian-PD under ``<.,.>_w``, not Euclidean.  We handle it once with a
+Hermitian-PD under ``<.,.>_w``, not Euclidean.  It is handled once by a
 real-DOF **isometry** ``T: a <-> x`` (:func:`alm_to_real` / :func:`real_to_alm`)
 with ``||x||_2 = ||a||_w``: ``a_{l0} -> a_{l0}`` (real), ``a_{lm>0} -> [sqrt2 Re,
 sqrt2 Im]``, dropping the structurally-zero ``l < |spin|`` modes.  In ``x``-space
-``A_x = T A T^-1`` is real-symmetric-PD in plain Euclidean, so stock
-:func:`jax.scipy.sparse.linalg.cg` is exactly correct.
+``A_x = T A T^-1`` is real-symmetric-PD in plain Euclidean, so plain CG
+(:func:`jax.scipy.sparse.linalg.cg`, or jht's preconditioned CG) is exactly
+correct.
 
 Library code does not enable x64; callers opt in per entry point (x64 is needed
 for the deep accuracy here, as elsewhere in jht).
@@ -567,12 +569,10 @@ def constrained_realization(
     P A_x P + I_phys``, so ``x = P y`` has mean ``a_wiener`` and covariance
     ``(A_x + D)^-1`` on the physical modes -- the posterior.  (The ``s1``
     factorization is exact because ``T S^T`` is the Euclidean transpose of
-    ``S T^-1`` -- the gated operator symmetry.  Whitening also keeps the CG
-    stopping rule meaningful: the unwhitened sampler injected ``sqrt(1/Cl)``-scaled
-    noise into the RHS, which for ``Cl = 0`` multipoles -- e.g. a zeroed
-    monopole/dipole -- inflated ``||b||`` by ~1e15 and made CG return garbage for
-    the physical modes.)  ``key`` is a ``jax.random`` PRNG key; one call returns
-    one draw.
+    ``S T^-1`` -- the gated operator symmetry.  In unwhitened coordinates the source
+    would carry ``sqrt(1/Cl)``-scaled noise, which for ``Cl = 0`` multipoles inflates
+    ``||b||`` enough to break the relative-residual stopping rule; whitening avoids
+    that.)  ``key`` is a ``jax.random`` PRNG key; one call returns one draw.
 
     Parameters (including ``precond`` / ``return_info``) mirror :func:`wiener`.  Returns
     a posterior a_lm sample, or ``(sample, SolveInfo)`` with ``return_info``.

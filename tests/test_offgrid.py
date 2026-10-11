@@ -1,4 +1,4 @@
-"""Phase-4 off-grid NUFFT gates: ``synthesis_general`` + its exact adjoint.
+"""Off-grid NUFFT gates: ``synthesis_general`` + its exact adjoint.
 
 * forward vs the **exact direct sum** ``sum_lm a_lm {}_sY_lm(theta_j, phi_j)`` (the
   perfect oracle) at the off-grid tier <= 1e-9;
@@ -8,9 +8,9 @@
 * **loc/pointing differentiability** (the beyond-ducc capability): ``d field / d loc``
   via native AD == the analytic field derivative, and ``jvp == vjp``.
 
-spin-0 and spin-2 (the make-or-break gate -- spin-2 must sit at the spin-0 tier,
-no s2fft-style m-leakage).  The off-grid NUFFT is a deliberately new accuracy tier
-set by ``epsilon`` (default 1e-10, matching ducc) -- *not* the on-grid 1e-13.
+spin-0 and spin-2 (spin-2 must sit at the spin-0 tier, with no m-leakage).  The
+off-grid NUFFT is a separate accuracy tier set by ``epsilon`` (default 1e-10,
+matching ducc), not the on-grid 1e-13.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Reverse-mode memory of the on-grid transforms (GitHub #4).
+"""Reverse-mode memory of the on-grid transforms.
 
 * ``synthesis_vjp`` / ``adjoint_synthesis_vjp`` return native AD's values and
   cotangents to ``ALG_TOL`` (non-physical inputs included; not bitwise, since GPU

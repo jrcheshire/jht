@@ -1,7 +1,7 @@
 """Public-API contract: ``jht.__all__`` is the supported dependency surface.
 
-This guards the surface a downstream (e.g. bk-jax adopting jht in place of ducc0,
-see ``docs/consumers.md``) pins against: every advertised name is importable and
+This guards the surface a downstream project pins against (``docs/consumers.md``):
+every advertised name is importable and
 callable, the re-exports point at the real implementations, and the top-level
 round-trip works -- so accidental shadowing or a broken re-export is caught.
 """

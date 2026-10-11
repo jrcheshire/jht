@@ -175,7 +175,7 @@ def adjoint_synthesis_vjp(maps, nside: int, lmax: int, spin: int = 0) -> jax.Arr
 
 
 def _m0_mask(lmax: int) -> jax.Array:
-    """``True`` at the m=0 a_lm entries (the first ``lmax+1``), built in-trace (jht#5)."""
+    """``True`` at the m=0 a_lm entries (the first ``lmax+1``), built in-trace."""
     return jax.lax.optimization_barrier(jnp.arange(alm_size(lmax)) <= lmax)
 
 

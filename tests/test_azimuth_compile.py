@@ -3,7 +3,7 @@ and high-l / large-L correctness.  SLOW (manual full suite, not the per-push gat
 
 * The default path emits one FFT kernel per distinct ring length (``= nside``); the
   looped path emits the belt's native FFT plus one common chirp-z length -- O(1),
-  independent of nside.  This is the fix for the compile-size blowup (issue #2).
+  independent of nside, which keeps SHT-heavy graphs under XLA's executable-size limit.
 * A self-contained SHT-heavy graph (the ``S^T diag(w) S`` normal operator applied
   repeatedly -- the shape that multiplies the per-SHT kernel count) must compile as
   one executable under the looped mode and match the default numerically.

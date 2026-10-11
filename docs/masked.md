@@ -1,7 +1,7 @@
 # jht — Partial-sky / masked analysis
 
-Cut-sky map → a_lm on HEALPix: the two estimators in `jht.masked`, their
-conventions, and what is and isn't gated. Companion to `docs/accuracy.md` (the
+Cut-sky map → a_lm on HEALPix: the operators in `jht.masked`, their conventions,
+and what is and isn't gated. Companion to `docs/accuracy.md` (the
 full-sky contract). All numbers are float64, CPU, `jax 0.9.2`; reproduce the
 table with `pixi run python scripts/masked_sweep.py` and gate with
 `pixi run python -m pytest tests/test_masked.py`.
@@ -110,7 +110,7 @@ stock CG. The preconditioner is never differentiated.
 ## The inner-product subtlety and the isometry `T`
 
 `S`/`Sᵀ` (`jht.healpix`) are adjoint in the **`(2−δ_m0)`-weighted** a_lm inner
-product, not the Euclidean one (the `2·conj` gotcha). So `A` is
+product, not the Euclidean one (the `2·conj` convention). So `A` is
 Hermitian-PD under `⟨·,·⟩_w`, not Euclidean, and stock conjugate gradient
 (which assumes Euclidean) would solve the wrong system.
 

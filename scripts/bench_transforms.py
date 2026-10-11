@@ -1,4 +1,4 @@
-"""Phase-1 performance benchmark for the jht on-grid transforms (CPU).
+"""Performance benchmark for the jht on-grid transforms (CPU).
 
 Reports, per ``(nside, lmax, spin)``: the **first-call** wall time (trace +
 XLA compile + run, cached thereafter), the **steady-state** run time (best of a
@@ -7,9 +7,8 @@ few jitted calls), and the process peak RSS.  Run::
     pixi run python scripts/bench_transforms.py            # default ladder
     pixi run python scripts/bench_transforms.py --max 512  # cap nside
 
-GPU timing is deferred to Phase 3 (JAX-metal float64 is unreliable); this is the
-CPU characterization that defines "done" for the performance phase.  See
-``docs/performance.md`` for the committed table and the architecture/memory model.
+GPU timing lives in ``scripts/gpu_check.py`` / ``scripts/gpu_diagnostic.py``.  See
+``docs/performance.md`` for the table and the architecture/memory model.
 """
 
 from __future__ import annotations
@@ -105,7 +104,7 @@ def main():
         f"{'nside':>5} {'lmax':>5} {'npix':>10} {'spin':>4} {'compile_s':>9} "
         f"{'synth_ms':>9} {'adj_ms':>9} {'map2alm_ms':>10} {'peakRSS_MB':>10}"
     )
-    print(f"jht Phase-1 transform benchmark (CPU, float64, jax {jax.__version__})\n")
+    print(f"jht transform benchmark (CPU, float64, jax {jax.__version__})\n")
     print(hdr)
     print("-" * len(hdr))
     for nside, lmax in LADDER:

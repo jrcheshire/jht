@@ -110,7 +110,7 @@ def _relerr(a, b) -> float:
 
 def _safe_relerr(make_gpu, make_cpu) -> float | str:
     """``relerr(make_gpu(), make_cpu())`` but report OOM / ptxas / error in-band, so a
-    small gpu_requeue slice (a 5 GB MIG can't hold nside=2048 map2alm at runtime) still
+    small MIG slice (a 5 GB MIG can't hold nside=2048 map2alm at runtime) still
     yields the row -- the synth parity is reported even when map2alm OOMs."""
     try:
         return _relerr(make_gpu(), make_cpu())

@@ -16,7 +16,7 @@ points are quasi-uniform, and ring weights condition it so it reaches machine
 precision in a few steps -- see ``docs/accuracy.md``).
 
 Distinct from :func:`jht.healpix.adjoint_synthesis`, which is the *exact*
-(unweighted) transpose ``S^T`` (the bk-jax seam / the VJP), not an inverse.
+(unweighted) transpose ``S^T``, not an inverse.
 """
 
 from __future__ import annotations

@@ -23,6 +23,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With `precond=` or `return_info=True` the solve runs jht's own preconditioned CG
   (`lax.while_loop`, same stopping rule as jax's `cg`) under `lax.custom_linear_solve`,
   so gradients stay implicit. With neither, the stock `cg` path is unchanged.
+- **Docs consolidated.** `docs/motivation.md` is folded into `docs/design.md` ("Why
+  jht"), and the measured HEALPix floor from `docs/findings_phase0.md` into
+  `docs/accuracy.md`; docs and docstrings describe current behaviour only.
+  `scripts/exploratory/phase0_floor.py` is renamed `spin2_floor.py`.
+
+### Removed
+- Site-specific SLURM submission scripts (`scripts/submit_*.sh`,
+  `scripts/vista_gh_validate.slurm`). `docs/gpu.md` describes running the GPU harnesses
+  on any machine or cluster.
 
 ## [0.3.0] - 2026-09-14
 
@@ -159,10 +168,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `niter=3`: ~1e-13 at `lmax = nside` → ~5e-7 at `lmax = 1.5·nside`; `niter=8`
   recovers ~1e-14) to `docs/accuracy.md`, a band-ceiling row (`nside=64,
   lmax=96`) to the accuracy gate, and a `DISCREPANCIES.md` entry.
-- **Docs** — rewrote `docs/` for a public audience: removed consumer-specific
-  (BICEP/Keck, bk-jax) and development-process references, trimmed `motivation.md`
-  to a concise justification, and de-jargoned (e.g. MUSE → field-level inference).
-  No code or API changes.
+- **Docs** — rewrote `docs/` for a public audience: removed consumer-specific and
+  development-process references, trimmed `motivation.md` to a concise justification,
+  and de-jargoned (e.g. MUSE → field-level inference). No code or API changes.
 
 ## [0.1.1] - 2026-06-10
 
@@ -211,9 +219,9 @@ the name `jht` is unavailable on PyPI). GitHub repo and import package stay `jht
 - **Differentiable real-DOF interface** — `synthesis_real`, `analysis_real`,
   `bandpower`, with the `alm_to_real` / `real_to_alm` isometry and the
   `alm_metric_weight` (2 − δ_m0) bridge.
-- **GPU (CUDA)** — pure JAX, runs on GPU with no code change. Measured on Cannon
-  A100/V100 (fp64): GPU==CPU parity ~1e-13 across the BK regime **including
-  nside=2048**; forward synthesis 14–60× CPU. Three fp64-scatter→gather reworks (the
+- **GPU (CUDA)** — pure JAX, runs on GPU with no code change. Measured on
+  A100/V100 (fp64): GPU==CPU parity ~1e-13 through **nside=2048**; forward synthesis
+  14–60× CPU. Three fp64-scatter→gather reworks (the
   `dense_to_tri` adjoint packing, the `nufft2d2` off-grid grid build, and the on-grid
   ring assembly) make the adjoint and off-grid forward fast and let nside=2048 compile.
   Parity + diagnostic harnesses `scripts/gpu_check.py`, `scripts/gpu_diagnostic.py`.

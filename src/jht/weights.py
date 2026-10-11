@@ -19,8 +19,8 @@ weight is ``W_i = (4pi/Npix)(1 + w_i)``.
 precomputed ``weight_ring_n*.fits`` files from an in-house solver whose exact
 degree/node target is undocumented and not cleanly reproducible (its achieved
 exactness degree has no closed form).  Depending on those files would also break
-the jax+numpy-only / no-files contract.  Instead we solve a well-posed,
-well-conditioned system here:
+the jax+numpy-only / no-files contract.  jht instead solves a well-posed,
+well-conditioned system:
 
     minimize ||w||  s.t.  sum_rings c_i n_i (1 + w_i) P_l(x_i) = Npix * delta_{l0}
     for even l = 0, 2, ..., Lw,   with Lw = 2*nside.
@@ -32,8 +32,7 @@ Between ``nside`` and the ``lmax <= 1.5*nside`` ceiling the residual quadrature
 error grows: the weighted ``niter=3`` round-trip is ~1e-13 at ``lmax = nside``
 but ~5e-7 at the ceiling (still well inside the 1e-4 contract; more iterations
 recover machine precision -- see ``docs/accuracy.md``).  Pushing ``Lw`` to the
-fully-determined ``4*nside-2`` is Vandermonde-ill-conditioned and was rejected.
-The minimum-norm (least-squares) solution regularizes the remaining out-of-band
+fully-determined ``4*nside-2`` is Vandermonde-ill-conditioned, so the minimum-norm (least-squares) solution regularizes the remaining out-of-band
 freedom.  Validated **end to end**
 (weighted round-trip accuracy matches ``healpy.map2alm(use_weights=True)``; see
 ``docs/accuracy.md``), not by matching HEALPix's weight array.

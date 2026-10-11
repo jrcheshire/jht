@@ -48,8 +48,8 @@ arXiv:2304.10431), clean-roomed in pure JAX. Per helicity component:
    type-1 `nufft2d1`).
 
 The adjoint reverses each step (type-1 NUFFT → transposed DFS/FFT → `adjoint_contract`).
-The new code is `jht._nufft` (the 2D NUFFT) and `jht.offgrid` (the DFS + spin
-channels); everything θ-Legendre is the existing on-grid machinery at a CC grid.
+Code: `jht._nufft` (the 2D NUFFT) and `jht.offgrid` (the DFS + spin channels); the
+θ-Legendre step is the on-grid recursion evaluated at the CC colatitudes.
 
 ### Accuracy knobs (ε → σ, W)
 
@@ -66,8 +66,8 @@ against the exact direct sum (`scripts/offgrid_sweep.py`):
 (lmax 256 unless noted; reproduce with `scripts/offgrid_sweep.py`. \|f\| ~ a few hundred,
 so ε=1e-10 is ~1e-12 relative.)
 
-This is a **deliberately new accuracy tier** set by the NUFFT ε (matching ducc) —
-*not* the on-grid weighted ~1e-13. Do not conflate the tiers.
+This is a **separate accuracy tier** set by the NUFFT ε (matching ducc), not the
+on-grid weighted ~1e-13. Do not conflate the tiers.
 
 ### Memory at scale
 

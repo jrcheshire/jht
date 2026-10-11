@@ -1,4 +1,4 @@
-"""Gate A (M3): broadband weighted accuracy -- the Phase-1 accuracy contract.
+"""Gate A: broadband weighted accuracy -- the accuracy contract.
 
 A random *broadband* band-limited a_lm (a real field; no ``l < |spin|`` modes) is
 synthesized to a map and recovered with :func:`jht.analysis`.  The

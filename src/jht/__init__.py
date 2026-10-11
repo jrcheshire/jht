@@ -25,8 +25,8 @@ Quick start::
     m = jht.synthesis(alm, nside, lmax, spin=0)        # a_lm -> map
     a = jht.analysis(m, nside, lmax, spin=0, niter=3)  # map -> a_lm (weighted)
 
-See ``README.md`` for the tour, ``docs/consumers.md`` for the downstream seam
-(e.g. using jht as a ducc0 replacement), and ``docs/gpu.md`` for the GPU story.
+See ``README.md`` for an overview, ``docs/consumers.md`` for the API a downstream
+project depends on, and ``docs/gpu.md`` for GPU use.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ __all__ = [
     "n_dof",
     # a_lm layout / inner-product helpers
     "alm_size",
-    "alm_metric_weight",  # the (2 - delta_m0) metric G (the bk-jax 2*conj bridge)
+    "alm_metric_weight",  # the (2 - delta_m0) metric G (the 2*conj VJP bridge)
     # compile-latency: opt in to JAX's persistent on-disk compilation cache
     "enable_compilation_cache",
     # azimuth-FFT strategy: opt in to the looped/chirp-z cap path (O(1) compiled

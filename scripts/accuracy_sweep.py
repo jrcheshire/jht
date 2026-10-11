@@ -1,4 +1,4 @@
-"""Phase-1 accuracy sweep for the jht HEALPix inverse (map2alm).
+"""Accuracy sweep for the jht HEALPix inverse (map2alm).
 
 Reports, per ``(nside, lmax, spin)``, the max-abs error of a broadband
 band-limited round-trip ``a -> synthesis -> map2alm -> a`` against the known
@@ -95,7 +95,7 @@ def main() -> None:
         f"{'nside':>5} {'lmax':>5} {'spin':>4} {'unw_bare':>10} {'unw_n3':>10} "
         f"{'w_bare':>10} {'w_n3':>10} {'healpy_n3':>10}"
     )
-    print(f"jht Phase-1 accuracy sweep (CPU, float64, jax {jax.__version__})")
+    print(f"jht accuracy sweep (CPU, float64, jax {jax.__version__})")
     print("broadband band-limited round-trip, max-abs a_lm error vs ground truth\n")
     print(hdr)
     print("-" * len(hdr))

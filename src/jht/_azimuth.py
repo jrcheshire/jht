@@ -96,7 +96,8 @@ class CapPlan(NamedTuple):
     """Static inputs for the looped cap azimuth transform (small NumPy vectors).
 
     The ``(n_cap, 2, n_out)`` gather/mask and the ``(n_cap, 2, M)`` phase are built
-    in-trace by :func:`cap_gather_mask` and :func:`cap_conj_phase` (jht#5).
+    in-trace by :func:`cap_gather_mask` and :func:`cap_conj_phase`, so they are runtime
+    buffers rather than embedded XLA constants.
     """
 
     M: int  # lmax + 1

@@ -1,13 +1,13 @@
-"""Spin2-floor gate (L2, the make-or-break): the spin-2 HEALPix inverse.
+"""Spin-2 floor gate: the spin-2 HEALPix inverse.
 
 Exercises the committed ``jht.analysis`` (bare + Jacobi) on the single
 modes where s2fft's spin-2 inverse fails (l0=8, m<l0 errors of 28-35%). jht must
 instead sit at the HEALPix ~1e-3 floor (no m<l defect) and iterate toward machine
 precision on band-limited input.
 
-Small ``nside`` keeps the (Phase-0, un-optimized) reference transforms fast; the
-precise floor across l is characterized in ``scripts/exploratory/phase0_floor.py``
-and ``docs/findings_phase0.md`` (bare ~2-3e-3 at nside=32, both spins).
+Small ``nside`` keeps the eager reference transforms fast; the precise floor across
+l is characterized in ``scripts/exploratory/spin2_floor.py`` and
+``docs/accuracy.md`` (bare ~2-3e-3 at nside=32, both spins).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ NSIDE, LMAX, L0 = 8, 12, 8  # l0=8 is below the l <= 1.5*nside = 18 ceiling
 
 # s2fft's recorded m<l0 error at l0=8 was 28-35%; jht must instead sit at the
 # HEALPix floor.  (At this coarse nside the floor is ~3e-3 -> ~100x better;
-# finer grids widen the gap further -- see docs/findings_phase0.md.)
+# finer grids widen the gap further -- see docs/accuracy.md.)
 S2FFT_DEFECT_L0_8 = 0.28
 
 

@@ -6,9 +6,9 @@ inverse-noise ``N^-1`` and a diagonal signal prior ``C_{lm} = Cl``.  In the
 real-DOF x-space (isometry ``T``) the prior is the *exact* diagonal
 ``D = diag(1/Cl)``; the solve runs in prior-whitened coordinates ``x = P y``,
 ``P = diag(sqrt(Cl))`` (operator ``P A_x P + I``), so zero-power multipoles are
-pinned to 0 exactly -- gated here including the zero-Cl regression (the old
-``1/Cl = 1e30`` path broke the CG stopping rule through the sampler's RHS noise
-and returned garbage for the physical modes).  The gate philosophy mirrors
+pinned to 0 exactly -- gated here, including the zero-Cl case, where a finite
+``1/Cl`` stand-in would break the CG stopping rule through the sampler's RHS noise
+and leave the physical modes unsolved.  The gate philosophy mirrors
 ``tests/test_masked.py``: **tight, oracle-backed deterministic gates** for the
 operator, the mean, and the limits; the constrained-realization *covariance* is
 checked by Monte Carlo at an **a-priori budgeted** tolerance (k-sigma on the known
@@ -269,7 +269,7 @@ def test_wiener_mean_matches_dense_solve(spin):
 
 
 # --------------------------------------------------------------------------- #
-# W-zero-Cl: zero-power multipoles -- the regression the 1/Cl=1e30 path failed
+# W-zero-Cl: zero-power multipoles are pinned; the physical block is solved
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("spin", [0, 2])
 def test_wiener_zero_cl_matches_dense(spin):
@@ -303,10 +303,10 @@ def test_wiener_zero_cl_matches_dense(spin):
 def test_constrained_realization_zero_cl_regression(spin):
     """The zero-Cl posterior draw solves the physical block correctly.
 
-    Regression: the old sampler added ``sqrt(1/Cl) xi ~ 1e15`` to the CG RHS for
-    zero-power multipoles, inflating ``||b||`` so the relative-residual stop fired
-    with the physical modes unsolved (measured rel. err ~1 vs the dense solve).
-    The RHS is replicated here (deterministic given the key) and dense-solved.
+    Guards against an unwhitened source: ``sqrt(1/Cl) xi`` for zero-power multipoles
+    would inflate ``||b||`` so the relative-residual stop fires with the physical
+    modes unsolved.  The RHS is replicated here (deterministic given the key) and
+    dense-solved.
     """
     nside, lmax = 8, 8
     npix = 12 * nside**2

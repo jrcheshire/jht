@@ -33,6 +33,7 @@ ducc0* for its GPU / differentiable tier, but nothing below is consumer-specific
 | off-grid exact transpose | `jht.adjoint_synthesis_general(field, loc, *, spin, lmax, epsilon)` | the `adjoint_synthesis_general` replacement |
 | masked analysis | `jht.pseudo_alm`, `jht.deconvolve` | zero-fill pseudo-aₗₘ; cut-sky CG deconvolution |
 | Wiener / field-level-inference inner solve | `jht.wiener`, `jht.constrained_realization` | `(SᵀN⁻¹S + C⁻¹)⁻¹SᵀN⁻¹m` (per-pixel `N⁻¹` + Cℓ prior); posterior draws |
+| Wiener preconditioning + convergence check | `jht.wiener_preconditioner`, `return_info=True` → `jht.SolveInfo` | build once per `(N⁻¹, Cℓ)`, pass as `precond=`; `SolveInfo.rel_residual > tol` flags an unconverged solve (see [`masked.md`](masked.md)) |
 
 `adjoint_synthesis` is the strict transpose of `synthesis` in the
 `(2 − δ_{m0})`-weighted aₗₘ inner product — this is the operator to drop into a
@@ -66,7 +67,7 @@ matches ducc on the physical modes (see [`offgrid.md`](offgrid.md) /
 [`DISCREPANCIES.md`](../DISCREPANCIES.md)). Accuracy is the NUFFT `epsilon` tier
 (default 1e-10, matching ducc) — distinct from the on-grid tiers below.
 
-## The convention bridge (the `2·conj` gotcha)
+## The convention bridge (`2·conj`)
 
 JAX's native reverse-mode returns the cotangent in the JAX convention, which
 relates to the strict math adjoint by the `(2 − δ_{m0})` metric `G`:

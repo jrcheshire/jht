@@ -37,7 +37,7 @@ dynamic = ["version"]   # single-sourced from src/jht/__init__.py (see [tool.hat
 # RUNTIME dependencies are deliberately minimal — this is the dependency-control
 # point of the project. jht itself needs only JAX + numpy. ducc0 / healpy are
 # VALIDATION ORACLES (compared against in tests), never runtime dependencies.
-# Floors: jax>=0.4.30 matches bk-jax; numpy>=1.24 is a conservative modern base.
+# Floors: jax>=0.4.30 and numpy>=1.24 are conservative modern bases.
 dependencies = [
   "jax>=0.4.30",
   "numpy>=1.24",
@@ -94,7 +94,7 @@ lint = "ruff check"
 format = "ruff format"
 typecheck = "mypy src/jht"
 
-# --- GPU environment (Phase 3; CUDA build of jaxlib for an NVIDIA box, e.g. Cannon) ---
+# --- GPU environment (CUDA build of jaxlib for an NVIDIA machine) ---
 # linux-64 and linux-aarch64 (e.g. Grace Hopper / Grace Blackwell); no CUDA on osx-arm64.
 # conda-forge ships the CUDA jaxlib for py312/py313 but NOT py314, so this env pins
 # python 3.13 (the default CPU env stays py314 -- numerics are identical, it is pure

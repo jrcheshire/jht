@@ -1,9 +1,8 @@
 """Off-grid spherical harmonic synthesis -- ``synthesis_general`` / its adjoint.
 
 Evaluate a band-limited field at *arbitrary* points (detector pointings) on the
-sphere, the JAX-native, differentiable replacement for ducc0's
-``synthesis_general`` / ``adjoint_synthesis_general`` (the bk-jax sim-forward TOD
-path -- the last ducc0 capability bk-jax depends on).
+sphere: a JAX-native, differentiable counterpart of ducc0's
+``synthesis_general`` / ``adjoint_synthesis_general``.
 
 Algorithm (matches ducc's ``sphere_interpol``): **Double-Fourier-Sphere + 2D
 type-2 NUFFT**.  ``alm`` --(Legendre step at a Clenshaw-Curtis theta grid; reuses

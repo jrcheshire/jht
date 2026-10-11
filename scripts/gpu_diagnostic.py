@@ -1,15 +1,12 @@
 """Single-shot large-scale GPU performance diagnostic for jht.
 
-Designed to wring the maximum diagnostic value out of **one** moderate-scale
-``gpu_requeue`` slot (A100 40/80 GB, or a MIG slice). jht's GPU numbers
-have so far been entirely *deferred* -- never measured. This run captures, in a
-single job:
+Designed to extract the full diagnostic set from **one** moderate-scale GPU slot
+(A100 40/80 GB, or a MIG slice). In a single job it captures:
 
   * fp64 GPU-vs-CPU speedup envelope, and the card's **fp64/fp32 throttle factor**
     -- the same op timed in both dtypes (fp32 is THROUGHPUT-ONLY here, never an
     accuracy claim: without x64 the transform silently drops to ~1e-3);
-  * fp64 **GPU==CPU parity** (relerr ~1e-12) measured on-device (so far only
-    asserted by the skipped ``tests/test_gpu.py`` gate);
+  * fp64 **GPU==CPU parity** (relerr ~1e-12) measured on-device;
   * the on-device **memory ceiling** per (nside, lmax, spin), incl. nside=2048;
   * **batched / vmap throughput** vs batch size (the forecast-sweep use case --
     its per-realization knee is the whole motivation for the GPU tier);
@@ -42,8 +39,8 @@ Usage (on the GPU box):
     python scripts/gpu_diagnostic.py --dry-run --limit-gb 10     # a 10 GB MIG slice
     python scripts/gpu_diagnostic.py --dry-run --limit-gb 80     # a full A100
 
-Built for ``gpu_requeue``, which hands you *whatever is free* -- often a 10-20 GB
-A100 MIG slice, occasionally a whole 80 GB card. The ladder is **memory-driven**:
+Built for preemptible GPU partitions that hand out *whatever is free* -- often a
+10-20 GB A100 MIG slice, occasionally a whole 80 GB card. The ladder is **memory-driven**:
 each heavy point is gated by a predicted device footprint against the detected (or
 ``--limit-gb``) memory, so the run fills whatever it lands on; the per-point OOM
 guard is the real boundary, and ``--max-wall`` ensures a short slot still saves
@@ -353,7 +350,7 @@ _TIER_BUDGET_GB = {"mig": 12.0, "a100-40": 40.0, "a100-80": 80.0, "cpu": float("
 def _tier_for(limit_gb: float, gpu: bool) -> str:
     if not gpu or np.isnan(limit_gb):
         return "cpu"
-    if limit_gb < 24:  # a gpu_requeue MIG slice (typically 10-20 GB)
+    if limit_gb < 24:  # a MIG slice (typically 10-20 GB)
         return "mig"
     if limit_gb < 56:
         return "a100-40"
@@ -413,9 +410,9 @@ def build_ladder(
                         best_of=best,
                     )
                 )
-    # off-grid before vmap: gpu_requeue is preemptible, so order by value -- the
-    # never-measured off-grid (ducc-replacement) capability should land before the
-    # more-inferable vmap throughput sweep if the slot is cut short.
+    # off-grid before vmap: on a preemptible slot, order by value -- the off-grid
+    # measurements should land before the more-inferable vmap throughput sweep if the
+    # slot is cut short.
     for lmax, npts, eps in OFFGRID if "offgrid" in kinds else ():
         if cpu and (lmax > 256 or npts > 100_000 or eps != 1e-10):
             continue
