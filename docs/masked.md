@@ -74,6 +74,39 @@ posterior. (The `s₁` factorization is exact because `T·Sᵀ` is the Euclidean
 transpose of `S·T⁻¹` — the gated operator symmetry.) This is the stochastic piece
 a full field-level-inference gradient needs.
 
+### Preconditioning and convergence diagnostics
+
+`wiener` and `constrained_realization` run stock CG by default, which stops at
+`max_iter` **silently** (jax's `cg` reports no convergence information). Two opt-in
+arguments change that:
+
+- `return_info=True` returns `(a_lm, SolveInfo)` with the iteration count and the final
+  relative residual `‖r‖/‖b‖`. `rel_residual > tol` means the solve hit `max_iter`
+  unconverged, and its output is then a truncated Krylov iterate, not the Wiener mean.
+  `deconvolve` takes `return_info` too.
+- `precond=wiener_preconditioner(signal_cl, nside, lmax, spin, inv_noise=..., ell_split=32)`
+  preconditions the whitened operator `P A_x P + I`. It changes the iteration count,
+  never the solution.
+
+The preconditioner is `M = 1 + Cℓ·n̄` per DOF, where `n̄ = mean(N⁻¹)·Npix/4π` is the
+isotropic level of `SᵀN⁻¹S` (the cut enters through the mean). On the DOFs with
+`ℓ ≤ ell_split`, it is replaced by the **exact** operator block.
+
+The diagonal alone fixes the ℓ-dependent signal-to-noise spread. But under a large cut it
+mis-scales the large-scale modes the cut removes: those modes see only the prior, not
+`n̄`, so the diagonal is no faster than plain CG there. The exact low-ℓ block treats them
+correctly.
+
+Building the block costs one operator application per low DOF:
+- `(ell_split+1)²` for spin 0;
+- `2((ell_split+1)² − 4)` for spin 2, which is 2170 at the default 32;
+- plus a dense inverse of that size.
+
+Build it once per `(N⁻¹, Cℓ)` and reuse it for every solve. With either argument set,
+the solve is jht's own preconditioned CG (`lax.while_loop`) under
+`lax.custom_linear_solve`, so gradients are implicit through the operator exactly as with
+stock CG. The preconditioner is never differentiated.
+
 ## The inner-product subtlety and the isometry `T`
 
 `S`/`Sᵀ` (`jht.healpix`) are adjoint in the **`(2−δ_m0)`-weighted** a_lm inner
@@ -116,6 +149,16 @@ dependency) is exactly correct. `T` is gated as an isometry (`‖Tx‖² = ‖a�
 | W-limits | `wiener(Cℓ→∞)` == `deconvolve(reg=0)`; `wiener(Cℓ=1/reg)` == `deconvolve(reg)` | 1e-7 / 1e-8 | ~1e-13 / 0 (exact) |
 | W-CR | constrained-realization sample mean/cov == posterior (MC, 4σ a-priori budget) | 4σ | within budget |
 | W-grad | `jax.grad(wiener)` wrt `Cℓ`/data finite + FD-consistent + `jit`-clean | 1e-2 (FD) | FD-consistent |
+| P-diag | `wiener_preconditioner` diagonal == independent `1/(1+Cℓ·n̄)` | 1e-12 | exact |
+| P-block | low-ℓ block == inverse of dense `(P A_x P + I)[low, low]` (spin 0 & 2, binary + apod) | 1e-10 | within |
+| P-mean | preconditioned `wiener` == dense solve (`ell_split` None / 4 / lmax; zero-Cℓ pinned modes exactly 0) | 1e-8 | within |
+| P-pcg | jht CG (`return_info`, no preconditioner) == dense == stock-`cg` path | 1e-8 | within |
+| P-exact | block covering every DOF (M = the operator) converges in ≤ 2 iterations | exact | ≤ 2 |
+| P-info | `rel_residual` == true `‖Pb−(PAP+I)y‖/‖Pb‖`, converged and at a 3-iteration cap | 1e-12 abs / 1e-8 rel | within |
+| P-CR | preconditioned `constrained_realization` == unpreconditioned (same key) | 1e-8 | within |
+| P-grad | `jax.grad` wrt `Cℓ` and data with `precond` == without; `jit`-clean | 1e-6 rel | within |
+| P-vmap | `vmap` over maps (with `SolveInfo` per lane) == per-sample calls | 1e-8 | within |
+| P-speedup | irregular band + holes cut, nside 32 / lmax 48: diagonal < none; diagonal + ℓ≤16 block ≤ ½ none | measured 454 / 241 / 123 | within |
 
 (`tests/test_wiener.py`. The Wiener *correctness* rests on the deterministic
 W-operator / W-adjoint / W-mean / W-limits gates; the W-CR Monte-Carlo gate is the
@@ -187,6 +230,32 @@ keeping the solve bounded. This is the field-level-inference tier;
 `constrained_realization` supplies the posterior draws its gradient needs. It
 resolves the mitigation path flagged for the spin-2 E/B ambiguous-mode limitation
 in `DISCREPANCIES.md`.
+
+## Wiener preconditioning — characterised — `scripts/wiener_precond_sweep.py`
+
+Iterations to a relative residual of 1e-8 for the spin-2 `wiener` solve.
+- Masks: irregular, a two-sided band `|b| < b_cut` plus 12 random 3–8° holes.
+- Prior: a red spectrum with beam-like damping.
+- Noise: white, σ = 1, giving S/N ≫ 1 at low ℓ and ~1 near lmax.
+- Grid: nside 64, lmax 96.
+
+| mask | f_sky | none | diagonal | diag + ℓ≤16 | diag + ℓ≤32 | build (s): diag / ℓ≤16 / ℓ≤32 |
+|---|---:|---:|---:|---:|---:|---|
+| \|b\|<10 + holes | 0.797 | 931 | 257 | 181 | **98** | 0.1 / 14 / 53 |
+| \|b\|<20 + holes | 0.645 | 867 | 410 | 210 | **101** | 0.0 / 15 / 55 |
+| \|b\|<30 + holes | 0.488 | 782 | 591 | 214 | **102** | 0.0 / 16 / 55 |
+
+- **The diagonal's gain shrinks as the cut grows,** because more of the large-scale modes
+  sit under the cut where it mis-scales them.
+- **With the ℓ≤32 block,** the count is flat across cuts at about 100, an 8–9× reduction.
+- **Every preconditioned solution** agrees with the unpreconditioned one to within the
+  tolerance limit (≤ 4e-5 relative, i.e. ~cond × tol).
+
+On Planck Galactic masks (GAL20 / GAL70, f_sky 0.2 / 0.7) at nside 128 / lmax 192, with a
+lensed-EE / residual-lensing-BB prior and noise from a cleaned 9-band map, the default
+`ell_split=32` cuts the iterations from 616 / 971 to 241 / 267. The build takes about 3 min
+on a laptop CPU. The diagonal alone gives 253 at GAL70 but no gain at GAL20, where the
+large-scale E under the cut dominates. Going to ℓ≤48 gave no further improvement.
 
 ## Scope
 

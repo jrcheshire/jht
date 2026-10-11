@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Wiener-solve preconditioner** `jht.wiener_preconditioner(signal_cl, nside, lmax, spin,
+  inv_noise=..., ell_split=32)`, passed as `precond=` to `wiener` /
+  `constrained_realization`. `M = 1 + Cl * nbar` per DOF, with the exact operator block on
+  `l <= ell_split`; the block is what makes the large-scale modes under a large cut
+  converge. It changes the iteration count, not the solution. On Galactic masks at nside
+  128 / lmax 192 (spin 2) it cuts iterations to 1e-8 from 616 / 971 to 241 / 267 (f_sky
+  0.2 / 0.7). Build cost: one operator application per low-l DOF (2170 at the default).
+- **Convergence diagnostics** `return_info=True` on `wiener`, `constrained_realization`
+  and `deconvolve` returns `(a_lm, SolveInfo(n_iter, rel_residual))`. Stock jax `cg`
+  reports nothing, so a solve that hit `max_iter` unconverged was indistinguishable from
+  a converged one.
+
+### Changed
+- With `precond=` or `return_info=True` the solve runs jht's own preconditioned CG
+  (`lax.while_loop`, same stopping rule as jax's `cg`) under `lax.custom_linear_solve`,
+  so gradients stay implicit. With neither, the stock `cg` path is unchanged.
+
 ## [0.3.0] - 2026-09-14
 
 ### Added
