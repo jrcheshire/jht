@@ -10,13 +10,13 @@ regime, nside = 8192 the compile ceiling), with both **on-grid** (pixel) and
 **off-grid** (arbitrary-pointing) transforms.
 
 Reach for jht when you need spherical harmonic transforms that run on a GPU,
-differentiate end-to-end, and whose numerics you can read and own. The full
-rationale — and the accuracy boundary versus a C++ production transform — is in
-[`docs/motivation.md`](docs/motivation.md).
+differentiate end-to-end, and whose numerics you can read and own. The rationale and
+the accuracy boundary versus a C++ production transform are in
+[`docs/design.md`](docs/design.md).
 
 ## What it does
 
-Validated by a gated suite (190 tests, float64) against **healpy** and **ducc0**:
+Validated by a gated suite (float64) against **healpy** and **ducc0**:
 
 - **On-grid transforms** — spin-0 & spin-2 synthesis (`aₗₘ→map`), its exact
   adjoint `Sᵀ`, and a weighted + Jacobi-iterated inverse (`analysis`, aka
@@ -30,7 +30,8 @@ Validated by a gated suite (190 tests, float64) against **healpy** and **ducc0**
 - **GPU** — pure JAX, so every transform runs on CUDA with no code change;
   measured GPU==CPU parity ~1e-13 (fp64) through nside=2048.
 - **Partial-sky** — masked pseudo-aₗₘ, a cut-sky CG deconvolution, and a masked
-  Wiener filter / constrained realization.
+  Wiener filter / constrained realization, with an optional preconditioner and
+  convergence diagnostics (`SolveInfo`).
 - **Accuracy** — jht's own ring quadrature weights + iteration reach ~1e-13 on
   band-limited maps (matching `healpy.map2alm(use_weights=True)`).
 
@@ -126,10 +127,10 @@ wiring lives in the consumer, not here.
 
 ## Docs
 
-- [`docs/design.md`](docs/design.md) — technical design, conventions, differentiability.
+- [`docs/design.md`](docs/design.md) — why jht, technical design, conventions, differentiability.
 - [`docs/accuracy.md`](docs/accuracy.md) — the accuracy contract + ring-weight algorithm.
 - [`docs/masked.md`](docs/masked.md) — partial-sky estimators.
 - [`docs/performance.md`](docs/performance.md) — CPU perf model + memory.
 - [`docs/gpu.md`](docs/gpu.md) — the GPU env, the x64 requirement, the harness.
 - [`docs/consumers.md`](docs/consumers.md) — the downstream-dependency seam.
-- [`docs/motivation.md`](docs/motivation.md) — why jht exists.
+- [`docs/offgrid.md`](docs/offgrid.md) — off-grid (NUFFT) synthesis.

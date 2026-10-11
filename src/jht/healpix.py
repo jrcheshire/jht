@@ -10,16 +10,17 @@ Conventions (verified vs healpy / ducc0; see ``docs/design.md``):
 
 ``synthesis`` is ``S: a_lm -> map``.  ``adjoint_synthesis`` is the *exact*
 transpose ``S^T = Y^T`` (unweighted; **not** the weighted analysis), which is the
-operator the bk-jax seam needs and the VJP of synthesis.
+operator a linear solve needs and, up to the ``(2 - delta_m0)`` metric, the
+cotangent of synthesis.
 
-**Phase-1 fast path.**  The transforms are vectorized over m (one fused
+The transforms are vectorized over m (one fused
 ``lax.scan`` per spin via :mod:`jht._recursion`), batch the per-ring phi-FFTs by
 ring length (the equatorial belt in one FFT; the polar cap by length-group), and
 are ``jit``-compiled.  Geometry, recursion plans, and index maps are built once
 per ``(nside, lmax, spin)`` and cached (``lru_cache`` on :func:`_prepare`), so the
 Jacobi iteration in :func:`jht.analysis` reuses one compiled kernel.
-Numerics are identical to the eager Phase-0 reference (:mod:`jht._reference`),
-which is retained as a validation oracle.  Library code does not enable x64;
+Numerics are identical to the eager reference (:mod:`jht._reference`), kept as a
+validation oracle.  Library code does not enable x64;
 callers opt in per entry point.
 """
 
@@ -188,7 +189,7 @@ class _Prepared(NamedTuple):
 
 
 def _opaque(fn):
-    """Wrap a transform kernel in a save-nothing ``jax.checkpoint`` (jht#4).
+    """Wrap a transform kernel in a save-nothing ``jax.checkpoint``.
 
     Under ``grad`` of a scanned body (e.g. ``lax.map`` over sims), JAX partial-evaluates
     the body and hoists work that depends only on loop constants out of the loop. The
@@ -239,7 +240,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
     gather, valid, pack = _tri_dense_maps(lmax)
 
     # per-(m, ring) azimuth phase e^{i m phi0_r}, built in-trace so the (M, nrings) table is
-    # a runtime buffer, not an embedded constant per use (jht#5)
+    # a runtime buffer, not an embedded constant per use
     m_pos = np.arange(lmax + 1)
 
     def phase_table():  # (M, nrings)
@@ -417,8 +418,8 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     """``S^T = Y^H : map -> a_lm`` -- the *exact* transpose of :func:`synthesis`.
 
     ``b_{l,m} = sum_p conj(Y_{l,m}(p)) m_p``.  This is **not** the weighted
-    analysis (the approximate inverse); it is the operator the bk-jax seam needs
-    and the cotangent of synthesis, satisfying
+    analysis (the approximate inverse); it is the operator a linear solve needs,
+    satisfying
 
         adjoint_synthesis(v) == (Npix / 4pi) * healpy.map2alm(v, iter=0)   (no weights)
 

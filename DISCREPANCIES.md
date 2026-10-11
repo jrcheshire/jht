@@ -1,7 +1,6 @@
 # DISCREPANCIES
 
-Residual numeric mismatches and known-limitation notes, with their cause — logged
-rather than buried as TODOs (mirroring bk-jax discipline). Each entry says
+Residual numeric mismatches and known limitations, with their cause. Each entry says
 whether it is a *defect* (to fix) or an *expected property* (to document).
 
 ## Weighted analysis floor rises toward the band ceiling (expected, not a defect)
@@ -36,23 +35,20 @@ within that subspace, and `reg>0` (Tikhonov) bounds it.
   precision. Only the *recoverability* of cut-localized E/B modes is limited.
 - **Manifestation:** in `scripts/masked_sweep.py`, deconvolution error grows as
   fsky shrinks and blows up under heavy apodization (which down-weights data).
-  spin-2 reaches the same recovery floor as spin-0 for mild cuts (no s2fft-style
-  m<ℓ defect — that was ruled out in Phase 0); the spin-2-specific limitation is
-  only the ambiguous-mode subspace at aggressive cuts.
-- **Mitigation / scope:** use `reg>0` to stabilise, restrict the recovered band,
-  or — now implemented — bound the ambiguous subspace with a signal prior via
-  `jht.masked.wiener` (the Cℓ-informed generalization of `reg`; the MUSE
-  inner-solve tier), with `constrained_realization` for posterior draws. The
-  operator and recovery are unchanged; the prior simply gives the unconstrained
-  subspace a principled, finite answer instead of the min-norm CG one. See
-  `docs/masked.md`.
+  spin-2 reaches the same recovery floor as spin-0 for mild cuts (there is no m<ℓ
+  defect; see `docs/accuracy.md`); the spin-2-specific limitation is only the
+  ambiguous-mode subspace at aggressive cuts.
+- **Mitigation / scope:** use `reg>0` to stabilise, restrict the recovered band, or
+  bound the ambiguous subspace with a signal prior via `jht.masked.wiener` (the
+  Cℓ-informed generalization of `reg`), with `constrained_realization` for posterior
+  draws. The prior gives the unconstrained subspace a finite answer instead of the
+  min-norm CG one. See `docs/masked.md`.
 
 ## Differentiability: `jax.linear_transpose` / forward-mode of the raw kernels (limitation, not a defect)
 
 The supported autodiff path is JAX's **native reverse/forward AD** through the
 public transforms — `jax.grad` / `vjp` / `jacrev` (complex aₗₘ), and `jacfwd ≡
-jacrev` / FD on the real-DOF layer (`jht.diff`). All Phase-2 gates pass on these
-(`tests/test_grad.py`).
+jacrev` / FD on the real-DOF layer (`jht.diff`), gated in `tests/test_grad.py`.
 
 Two lower-level entry points are **not** supported, by deliberate choice:
 
@@ -60,9 +56,8 @@ Two lower-level entry points are **not** supported, by deliberate choice:
   engine is not directly transposable as a standalone linear function ("Error
   interpreting argument to scan as a JAX value"). `jax.vjp`/`grad` are unaffected:
   they linearize first (baking the static recursion plan as constants) and
-  transpose the linearized jaxpr, which is clean. Forward scatters carry
-  `unique_indices=True` so the *scatter*-transpose blocker is gone; the residual is
-  the scan, which native AD sidesteps.
+  transpose the linearized jaxpr, which is clean. (Forward scatters carry
+  `unique_indices=True`, so scatters are not the obstacle; the scan is.)
 - `jax.jacfwd` / `jax.jvp` on the **complex** `synthesis` — `jacfwd` requires
   real-valued inputs (a JAX constraint, not jht-specific). Forward-mode lives on
   the **real-DOF layer** (`synthesis_real`/`analysis_real`), where `jacfwd ≡
@@ -70,9 +65,9 @@ Two lower-level entry points are **not** supported, by deliberate choice:
 
 - **Status:** expected JAX-mechanics limitations with first-class supported
   alternatives, **not** transform defects. A `custom_vjp` would *block* forward
-  mode entirely; the only kernel-routing fix needs JAX's internal `jax.core.
-  Primitive` API (removed in jax 0.9.2). Native AD is the chosen, version-stable
-  path. See `docs/design.md` §Differentiability.
+  mode entirely, and routing reverse mode through a hand kernel while keeping forward
+  mode would need JAX-internal primitives. Native AD is the version-stable path. See
+  `docs/design.md` §Differentiability.
 
 ## Off-grid (`synthesis_general`): spin>0 m=0 phantom vs ducc (expected, not a defect)
 
@@ -89,7 +84,7 @@ ducc0's `adjoint_synthesis_general` zeros it.
   cross-check (`test_adjoint_vs_ducc`) compares the physical m≥1 modes (matched to
   ~1e-13); the m≥1 / real-m=0 content agrees with ducc bit-for-bit.
 
-## Off-grid: the −spin channel carries `(−1)^s` (convention pin, now matched to ducc)
+## Off-grid: the −spin channel carries `(−1)^s` (convention pin, matches ducc)
 
 The spin-weighted E/B → ±spin mapping is `+s a = −(aE + i aB)`, `−s a =
 −(−1)^s (aE − i aB)`. The `(−1)^s` on the −spin channel is **invisible for even

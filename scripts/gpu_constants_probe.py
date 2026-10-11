@@ -1,4 +1,4 @@
-"""GPU probe for GitHub #4 / #5: an SHT-heavy ``value_and_grad`` at high nside loads and runs.
+"""GPU probe: an SHT-heavy ``value_and_grad`` at high nside compiles, loads and runs.
 
     pixi run -e gpu python scripts/gpu_constants_probe.py --nside 2048 --pairs 16
     pixi run -e gpu python scripts/gpu_constants_probe.py --nside 2048 --pairs 16 --old-tables
@@ -8,10 +8,11 @@ Each of ``--sims`` sims (a checkpointed ``lax.map`` body) runs ``--pairs`` spin-
 the gradient is taken w.r.t. that weight, so the backward also runs every transform. The
 maps are rescaled by ``4 pi / npix`` after each pair so values stay O(1).
 
-``--old-tables`` reinstates the pre-#5 recursion tables (NumPy arrays closed over, so XLA
-embeds a copy per use) for an A/B in one environment. Run with JAX's default GPU
-preallocation: the pre-#5 failure is the CUDA driver loading that constant data outside
-the preallocated pool (``Failed to load in-memory CUBIN ... OUT_OF_MEMORY``).
+``--old-tables`` closes the recursion tables over as NumPy arrays (so XLA embeds a copy
+per use) instead of building them in-trace, for an A/B in one environment. Run with
+JAX's default GPU preallocation: with embedded tables the CUDA driver loads that
+constant data outside the preallocated pool and fails at high nside
+(``Failed to load in-memory CUBIN ... OUT_OF_MEMORY``).
 
 Prints the devices, compile+first and steady wall times, the value and gradient, peak
 device bytes (if reported) and peak host RSS. Exits 1 on a failed evaluation.

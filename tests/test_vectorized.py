@@ -1,10 +1,9 @@
-"""Phase-1 equivalence gates: the vectorized/jitted fast path == the Phase-0 reference.
+"""Equivalence gates: the vectorized/jitted transforms == the eager reference.
 
 The fast path (one fused all-m ``lax.scan`` + batched ring FFTs + jit, in
-:mod:`jht._recursion` / :mod:`jht.healpix`) must reproduce the validated eager
-Phase-0 transforms (:mod:`jht._reference`) and the per-m recursion, to machine
-precision -- the refactor is performance-only and changes no numerics.  This is
-in addition to the healpy/ducc parity gates in ``test_healpix.py``.
+:mod:`jht._recursion` / :mod:`jht.healpix`) must reproduce the eager reference
+transforms (:mod:`jht._reference`) and the per-m recursion to machine precision.
+This is in addition to the healpy/ducc parity gates in ``test_healpix.py``.
 """
 
 from __future__ import annotations
@@ -100,7 +99,7 @@ def test_adjoint_contract_matches_per_m(spin, lmax):
 
 
 # --------------------------------------------------------------------------- #
-# the public fast transforms vs the eager Phase-0 reference
+# the public fast transforms vs the eager reference
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24)])
 def test_fast_synthesis_matches_reference_spin0(nside, lmax):

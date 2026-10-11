@@ -1,10 +1,9 @@
-"""Phase-0 reference transforms (eager, per-ring) -- kept as a validation oracle.
+"""Reference transforms (eager, per-ring), used as a validation oracle.
 
-These are the original correctness-first implementations from the Phase-0 spike:
-an eager Python loop over m and over rings, recursion recomputed every call.
-They are **slow** (small nside only) and are retained solely as a second oracle
-for the Phase-1 vectorized fast path in :mod:`jht.healpix` (the ``*_reference``
-vs fast parity test), alongside the healpy / ducc0 gates.
+Correctness-first implementations: an eager Python loop over m and over rings,
+recursion recomputed every call.  They are **slow** (small nside only) and serve as
+a second oracle for the vectorized transforms in :mod:`jht.healpix`
+(``tests/test_vectorized.py``), alongside the healpy / ducc0 gates.
 
 Do not use these in production; import the public ``synthesis`` /
 ``adjoint_synthesis`` from :mod:`jht.healpix` instead.

@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-10
+
+### Added
+- **Wiener-solve preconditioner** `jht.wiener_preconditioner(signal_cl, nside, lmax, spin,
+  inv_noise=..., ell_split=32)`, passed as `precond=` to `wiener` /
+  `constrained_realization`. `M = 1 + Cl * nbar` per DOF, with the exact operator block on
+  `l <= ell_split`; the block is what makes the large-scale modes under a large cut
+  converge. It changes the iteration count, not the solution. On Galactic masks at nside
+  128 / lmax 192 (spin 2) it cuts iterations to 1e-8 from 616 / 971 to 241 / 267 (f_sky
+  0.2 / 0.7). Build cost: one operator application per low-l DOF (2170 at the default).
+- **Convergence diagnostics** `return_info=True` on `wiener`, `constrained_realization`
+  and `deconvolve` returns `(a_lm, SolveInfo(n_iter, rel_residual))`. Stock jax `cg`
+  reports nothing, so a solve that hit `max_iter` unconverged was indistinguishable from
+  a converged one.
+
+### Changed
+- With `precond=` or `return_info=True` the solve runs jht's own preconditioned CG
+  (`lax.while_loop`, same stopping rule as jax's `cg`) under `lax.custom_linear_solve`,
+  so gradients stay implicit. With neither, the stock `cg` path is unchanged.
+- **Docs consolidated.** `docs/motivation.md` is folded into `docs/design.md` ("Why
+  jht"), and the measured HEALPix floor from `docs/findings_phase0.md` into
+  `docs/accuracy.md`; docs and docstrings describe current behaviour only.
+  `scripts/exploratory/phase0_floor.py` is renamed `spin2_floor.py`.
+
+### Removed
+- Site-specific SLURM submission scripts (`scripts/submit_*.sh`,
+  `scripts/vista_gh_validate.slurm`). `docs/gpu.md` describes running the GPU harnesses
+  on any machine or cluster.
+
 ## [0.3.0] - 2026-09-14
 
 ### Added
@@ -141,10 +170,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `niter=3`: ~1e-13 at `lmax = nside` → ~5e-7 at `lmax = 1.5·nside`; `niter=8`
   recovers ~1e-14) to `docs/accuracy.md`, a band-ceiling row (`nside=64,
   lmax=96`) to the accuracy gate, and a `DISCREPANCIES.md` entry.
-- **Docs** — rewrote `docs/` for a public audience: removed consumer-specific
-  (BICEP/Keck, bk-jax) and development-process references, trimmed `motivation.md`
-  to a concise justification, and de-jargoned (e.g. MUSE → field-level inference).
-  No code or API changes.
+- **Docs** — rewrote `docs/` for a public audience: removed consumer-specific and
+  development-process references, trimmed `motivation.md` to a concise justification,
+  and de-jargoned (e.g. MUSE → field-level inference). No code or API changes.
 
 ## [0.1.1] - 2026-06-10
 
@@ -193,12 +221,19 @@ the name `jht` is unavailable on PyPI). GitHub repo and import package stay `jht
 - **Differentiable real-DOF interface** — `synthesis_real`, `analysis_real`,
   `bandpower`, with the `alm_to_real` / `real_to_alm` isometry and the
   `alm_metric_weight` (2 − δ_m0) bridge.
-- **GPU (CUDA)** — pure JAX, runs on GPU with no code change. Measured on Cannon
-  A100/V100 (fp64): GPU==CPU parity ~1e-13 across the BK regime **including
-  nside=2048**; forward synthesis 14–60× CPU. Three fp64-scatter→gather reworks (the
+- **GPU (CUDA)** — pure JAX, runs on GPU with no code change. Measured on
+  A100/V100 (fp64): GPU==CPU parity ~1e-13 through **nside=2048**; forward synthesis
+  14–60× CPU. Three fp64-scatter→gather reworks (the
   `dense_to_tri` adjoint packing, the `nufft2d2` off-grid grid build, and the on-grid
   ring assembly) make the adjoint and off-grid forward fast and let nside=2048 compile.
   Parity + diagnostic harnesses `scripts/gpu_check.py`, `scripts/gpu_diagnostic.py`.
 
-[Unreleased]: https://github.com/jrcheshire/jht/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jrcheshire/jht/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jrcheshire/jht/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/jrcheshire/jht/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/jrcheshire/jht/compare/v0.1.4...v0.2.0
+[0.1.4]: https://github.com/jrcheshire/jht/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/jrcheshire/jht/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/jrcheshire/jht/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/jrcheshire/jht/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jrcheshire/jht/releases/tag/v0.1.0

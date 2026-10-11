@@ -13,12 +13,12 @@ Kostelec-Rockmore), run in the **increasing-l** direction, stabilized by a
 **branch-free per-step log-renormalization**: at every step the running pair is
 rescaled to unit norm and the logarithm of the scale is accumulated, so the
 mantissas stay O(1) while the true magnitude is carried in the (real-valued)
-log-scale.  This holds to l ~ 1000 in float64 without the under/overflow that
-kills a naive recursion near the poles (where the sectoral seed carries
-``sin(theta)**m``).
+log-scale.  This avoids the under/overflow that kills a naive recursion near the
+poles (where the sectoral seed carries ``sin(theta)**m``); float64 roundoff grows
+as ~eps*sqrt(l) and is measured flat to l = 32000.
 
-The spin-weighted (spin-2) functions reuse the same machinery with the Wigner-d
-recursion; they are added in a separate step.  This module is spin-0 for now.
+The spin-weighted functions use the Wigner-d three-term recursion with the same
+renormalization (:func:`wigner_d_column`, :func:`spin_weighted_lambda`).
 
 Library code does **not** enable x64; callers opt in per entry point via
 ``jax.config.update("jax_enable_x64", True)``.  Accuracy work needs float64.
@@ -237,10 +237,10 @@ def spin_weighted_lambda(x, m: int, spin: int, lmax: int) -> jax.Array:
 
 
 # --------------------------------------------------------------------------- #
-# Vectorized all-m recursion + fused contraction (Phase 1 performance).
+# Vectorized all-m recursion + fused contraction.
 #
-# The per-m functions above are the *validated reference*.  For production we run
-# every m through a single ``lax.scan`` over l (one fused, jit/vmap-clean kernel
+# The per-m functions above are the reference.  The transforms run every m through
+# a single ``lax.scan`` over l (one fused, jit/vmap-clean kernel
 # instead of lmax+1 eager scans), and **fuse the l-contraction into the scan** so
 # the full lambda table is never materialized -- peak memory is O(M.n_theta), not
 # O(L.M.n_theta) (~16 GB/component at nside=2048).  The static recurrence/seed
@@ -379,7 +379,7 @@ def _plan_arrays(plan: RecursionPlan):
     Only ``(M,)`` and ``(n_theta,)`` vectors enter as constants. The ``(lmax+1, M)`` and
     ``(M, n_theta)`` grids are computed in-graph and passed through
     ``optimization_barrier``, so XLA neither folds them back into embedded constants nor
-    keeps a copy per use site (jht#5). Every table matches the reference exactly except
+    keeps a copy per use site. Every table matches the reference exactly except
     ``seed_log``, which differs by <= 1 ulp under jit (XLA contracts multiply-add); through
     the recursion that is ~5e-15 relative at lmax=192 and ~2e-13 at lmax=4000.
     """

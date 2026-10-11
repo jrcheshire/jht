@@ -1,4 +1,4 @@
-# jht — Accuracy (Phase-1 contract)
+# jht — Accuracy
 
 The measured accuracy of the jht HEALPix inverse (`analysis`, aka `map2alm`), the ring-weight
 algorithm behind it, and the committed tolerance. Companion to
@@ -6,7 +6,7 @@ algorithm behind it, and the committed tolerance. Companion to
 `pixi run python scripts/accuracy_sweep.py` and gate with
 `pixi run python -m pytest tests/test_accuracy.py tests/test_weights.py`.
 
-## The contract (a-priori, signed off)
+## The contract (a-priori)
 
 HEALPix has **no sampling theorem**, so any HEALPix SHT is approximate. The
 quantity gated is the **broadband band-limited round-trip**: a random a_lm for a
@@ -18,13 +18,10 @@ difference from the known input a_lm.
   nside ∈ {32,64,128,256} at `lmax = nside`, plus a band-ceiling row
   (`nside=64, lmax=96`), spin ∈ {0,2}. (`tests/test_accuracy.py`, Gate A.)
 - **Measured:** ~**1e-13** (≈9 orders of headroom) — machine precision, matching
-  `healpy.map2alm(use_weights=True, iter=3)`. The gate is held at the a-priori
-  1e-4 (not tightened to one machine's float64 floor; the headroom is documented
-  here instead, per the standing "tolerances a-priori, don't chase one machine"
-  rule).
-- This **resolves the pending Phase-0 floor sign-off**: the loose ~2–3e-3 bare
-  carryover is now the *unweighted baseline*; the committed tier is the weighted
-  + iterated 1e-4 above.
+  `healpy.map2alm(use_weights=True, iter=3)`. The gate stays at the a-priori 1e-4
+  rather than one machine's float64 floor; the headroom is documented here.
+- The unweighted bare floor (~2–3e-3 for both spins) is the baseline the weights
+  improve on, not a contract tier.
 
 ## Measured floor (broadband round-trip, max-abs a_lm error vs ground truth)
 
@@ -43,6 +40,31 @@ Takeaways: ring weights drop the **bare** floor ~10× (~1e-3 → ~1e-4 tier) and
 let the Jacobi iteration reach machine precision (the unweighted iteration stalls
 ~1e-7); **spin-2 ≡ spin-0** at every tier (no spin-2 m<ℓ structural defect); jht's
 weighted result matches/beats healpy's ring-weighted `map2alm`.
+
+## Operator gates and the spin-2 single-mode floor
+
+| Gate | What | Measured | a-priori |
+|---|---|---|---|
+| Recursion | `λ_{ℓ,m}` vs scipy, all m, ℓ → 512 | 1e-12 (scipy NaNs at ℓ=1000, m≪ℓ; jht stays finite) | ≤1e-12 |
+| Synthesis, spin 0 / 2 | vs healpy **and** ducc0 | ≤1e-13 | ≤1e-10 |
+| Adjoint, spin 0 / 2 | `⟨Sa,v⟩ = ⟨a,Sᵀv⟩`; `== (Npix/4π)·map2alm(iter=0)` | 1e-16 / 3–4e-14 | ≤1e-10 |
+
+A single E-mode injected at `(ℓ0, m0)`, synthesized to (Q, U) and analyzed back
+(unweighted, bare), max error over all modes and channels; `nside=32, lmax=40`, below
+the `ℓ ≤ 1.5·nside = 48` ceiling, so this measures quadrature, not aliasing:
+
+| ℓ0 | m = ℓ0 (sectoral) | worst m < ℓ0 |
+|---:|---:|---:|
+| 8 | 3.3e-5 | 1.1e-3 |
+| 16 | 4.4e-6 | 1.5e-3 |
+| 32 | 2.7e-8 | 2.2e-3 |
+
+The error is flat at the ~1e-3 floor across all m (no m < ℓ leakage), the spin-0
+control sits at the same floor (2.9e-3 bare), and Jacobi iteration on a band-limited
+mode converges to machine precision (ℓ0=16, m0=8: niter 0/1/3/5 →
+7.7e-5 / 7.4e-8 / 7.0e-14 / 4.8e-17). The recursion is not the limiting factor: it
+holds where scipy's `sph_harm_y` underflows to NaN (ℓ=1000, m≪ℓ). Gated by
+`tests/test_recursion.py`, `tests/test_healpix.py`, `tests/test_floor.py`.
 
 ## Ring weights — jht's own, pure-numpy, no files (`jht.weights`)
 
@@ -74,8 +96,8 @@ conditioned system in numpy (once per nside, cached, off the JAX hot path):
   `lmax ≤ nside` — which is where the deep ~1e-13 floor in the table above is
   measured. Above `nside` the residual error grows (see "Behavior toward the
   band ceiling" below). The fully-determined system (`Lw = 4·nside−2`) is
-  Vandermonde-ill-conditioned and was rejected; the minimum-norm (`lstsq`)
-  solution regularizes the remaining out-of-band freedom.
+  Vandermonde-ill-conditioned, so the minimum-norm (`lstsq`) solution of the
+  `Lw = 2·nside` system is used; it regularizes the remaining out-of-band freedom.
 - **Convention:** the stored `w_i` is the deviation from 1 (matching HEALPix's
   file convention); `T == Q == U`, so one array serves both spins.
 
@@ -175,16 +197,15 @@ change. Memory scales ~linearly with pixel count (nside=4096 ≈ 31–39 GB floa
 `S^T W S a = S^T W m`: `a_{k+1} = a_k + A0 (m − S a_k)`. It converges because the
 HEALPix points are quasi-uniform; ring weights precondition it. `niter=3` is the
 default and reaches the floor above; `niter=0` is the bare weighted estimator.
-The exact (unweighted) transpose `adjoint_synthesis = S^T` (the operator seam / the
-VJP) is **not** weighted and is unchanged by this work.
+The exact (unweighted) transpose `adjoint_synthesis = S^T` is **not** weighted.
 
-## Notes / open
+## Notes
 
-- **Weight-solve conditioning at scale (resolved):** the `Lw = 2·nside` lstsq stays
+- **Weight-solve conditioning at scale:** the `Lw = 2·nside` lstsq stays
   well-conditioned — `cond(A) ≈ 1.24·nside` (→ ~5e3 at nside=4096, ~3 digits of 16)
   — and the m=0 quadrature stays exact to ~1e-16 **through nside=4096**, so the deep
   inverse floor's `ℓ ≤ nside` quadrature exactness holds at scale. Gated `slow` in
   `tests/test_weights.py`; measured by `scripts/exploratory/weight_conditioning.py`.
 - **Partial-sky (masked) analysis** has its own contract and document,
-  `docs/masked.md` (the masked pseudo-a_lm + the cut-sky CG deconvolution); this
+  `docs/masked.md` (pseudo-a_lm, cut-sky deconvolution, Wiener filter); this
   contract is full-sky.

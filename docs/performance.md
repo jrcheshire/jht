@@ -1,43 +1,30 @@
 # jht — performance
 
-Performance characterization of the on-grid HEALPix transforms: a vectorized
-ℓ-recursion + jit + batched per-ring FFTs + equatorial (N/S) symmetry. Numerics
-are unchanged from the eager reference implementation — `tests/test_vectorized.py`
-gates the fast path against that reference, and `tests/test_healpix.py` the
-healpy/ducc parity.
+Performance characterization of the on-grid HEALPix transforms. The fast path is
+gated against the eager reference implementation (`jht._reference`) by
+`tests/test_vectorized.py`, and against healpy / ducc0 by `tests/test_healpix.py`.
 
-**Headline:** small transforms run in **~1–2 ms** (nside=32), dominated by the
-ℓ-recursion that jit + vectorization make fast. The code is jit/vmap-clean and
-runs unchanged on GPU — see "GPU performance" below.
+**Headline:** small transforms run in ~1–2 ms (nside=32), dominated by the
+ℓ-recursion. The code is jit/vmap-clean and runs unchanged on GPU (`docs/gpu.md`).
 
-## What changed (and why it was slow)
+## How the transforms are made fast
 
-The Phase-0 reference (`jht._reference`, retained as a validation oracle) was slow
-for four compounding reasons, all addressed:
+1. **jit + cached plans.** The public transforms are jit-compiled; geometry, recursion
+   plans and index maps are built once per `(nside, lmax, spin)` (`lru_cache` on
+   `_prepare`), so `analysis`'s Jacobi iteration reuses one compiled kernel.
+2. **One fused all-m recursion.** A single `lax.scan` vectorizes the recursion over m
+   and fuses the ℓ-contraction, so the full λ table is never materialized: peak λ
+   memory is `O(M·n_θ)`, not `O(L·M·n_θ)` (≈ 16 GB per component at nside=2048).
+3. **Batched ring FFTs.** The φ-FFTs are batched by ring length: the equatorial belt
+   (`2·nside+1` rings) in one FFT, the polar caps by length group.
+4. **Equatorial symmetry.** The recursion runs only on the north half + equator
+   (`2·nside` colatitudes), using `λˢ_{ℓm}(π−θ) = (−1)^{ℓ+m} λ⁻ˢ_{ℓm}(θ)`. Spin 0 splits
+   the ℓ-sum into even/odd; spin 2 advances the ±2 recursions together. ~1.8× at
+   nside=512, tending to 2× as the recursion dominates.
 
-1. **No `jit`** — every op dispatched eagerly with a host round-trip. → the public
-   transforms are `jit`-compiled; geometry / recursion plans / index maps are
-   built once per `(nside, lmax, spin)` and cached (`lru_cache` on `_prepare`), so
-   `map2alm`'s Jacobi iteration reuses one compiled kernel.
-2. **Python loop over `m`** (lmax+1 separate scans) → one fused all-m `lax.scan`
-   that vectorizes the recursion over `m` and **fuses the ℓ-contraction**, so the
-   full λ table is never materialized (peak λ memory `O(M·n_θ)`, not
-   `O(L·M·n_θ)` ≈ 16 GB/component at nside=2048).
-3. **Python loop over rings** (one small FFT each) → the φ-FFTs are batched by ring
-   length: the equatorial belt (`2·nside+1` rings) in a single FFT, the polar cap
-   by length-group.
-4. **No equatorial symmetry** → the recursion (≈98 % of the runtime; see below)
-   runs only on the north half + equator (`2·nside` colatitudes), using the
-   reflection parity `λˢ_{ℓm}(π−θ) = (−1)^{ℓ+m} λ⁻ˢ_{ℓm}(θ)`. spin-0 splits the
-   ℓ-sum into even/odd; spin-2 advances the +2 and −2 recursions together (the
-   ±s coupling). This is a ~1.8× win at nside=512 (fixed lmax), trending to 2× as
-   the recursion dominates more at the ceiling.
-
-The recursion is the bottleneck by a wide margin — a fixed-lmax probe found
-synthesis is **90–98 % recursion**, FFTs ≲10 % — which is why the on-the-fly
-fused contraction and the N/S halving (both targeting the recursion) are the
-levers that matter, and why a dense-λ cache (memory-blocked at the ceiling) was
-not pursued.
+Synthesis is **90–98% recursion** (FFTs ≲ 10%), which is why the fused on-the-fly
+contraction and the N/S halving are the levers that matter, and why there is no dense
+λ cache (it would not fit at the ceiling).
 
 ## Benchmark (CPU, float64)
 
@@ -87,60 +74,35 @@ Per transform, the dominant live arrays are:
 There is **no dense `O(L·M·n_θ)` λ table** — that is the deliberate on-the-fly
 choice (a dense table would be ≈16 GB *per spin component* at the ceiling).
 
-The FFT-assembly stage (not the recursion) processes the polar cap as ~`nside`
-length-groups — a length-N HEALPix ring needs an exact length-N FFT, so the
-per-ring FFTs cannot be padded to a common length. The per-group **output writes**
-were a ~`nside`-way unrolled fp64 scatter into the `O(npix)` map; they are now
-hoisted out of the ring loop into a **single combined gather** (`pix_to_buf` /
-`ring_to_col` static permutations in `src/jht/healpix.py`). That de-unroll is what
-makes nside=2048 compile on GPU (see below) — bit-identical, runtime unaffected
-(FFTs are ≲10 %).
+The FFT-assembly stage processes the polar caps as ~`nside` length groups: a
+length-N HEALPix ring needs an exact length-N FFT, so the per-ring FFTs cannot be
+padded to a common length. The per-group outputs are assembled by a **single combined
+gather** (`pix_to_buf` / `ring_to_col` static permutations in `src/jht/healpix.py`)
+outside the ring loop; an unrolled per-group scatter would not compile on GPU at
+nside=2048.
 
-## Notes / future levers (deferred)
+## Known costs
 
-- **Compile time grows with the cap-FFT length-groups** (~nside distinct lengths
-  unrolled in one jit). One-time (jit caches by shape) and modest on CPU; on GPU
-  the *one-time* compile is multi-minute at nside ≥ 1024. The combined-gather
-  de-unroll (above) removed the per-group scatter that pushed the full module past
-  `ptxas` at nside=2048, so it now compiles; the remaining multi-minute compile is
-  the per-length-FFT unroll itself (a future lever, not a blocker) — see `docs/gpu.md`.
-- **`map2alm` recomputes the recursion** each of its 7 passes (the memory-safe
-  on-the-fly choice). A memory-gated cached-λ fast path for small nside is an
-  easy future optimization.
-- Ring quadrature weights, the full nside/lmax/spin accuracy matrix, and
-  partial-sky (masked) analysis are characterized in `docs/accuracy.md` and
-  `docs/masked.md`; differentiability and GPU are covered below / in `docs/gpu.md`.
+- **Compile time** grows with the number of cap-FFT length groups (~nside distinct
+  lengths in one jit). It is one-time per program and modest on CPU, but multi-minute
+  at nside ≥ 1024 on GPU; see "Compile time" below.
+- **`analysis` recomputes the recursion** in each of its `1 + 2·niter` passes (the
+  memory-safe on-the-fly choice).
+
+Ring weights and the accuracy matrix are in `docs/accuracy.md`; partial-sky analysis in
+`docs/masked.md`.
 
 ## GPU performance
 
-Method and full numbers in `docs/gpu.md`. Headline (A100 MIG / V100, fp64):
-
-- **Forward synthesis** GPU-accelerates **14–60×** the (8-core) CPU; fp64/fp32 ≈
-  2.2×; fp64 GPU==CPU parity 1e-14 … 1e-13 across the supported regime **incl. nside=2048**.
-- **Adjoint / `map2alm`** were initially ~21× too slow on GPU: the dense→triangular
-  alm packing used a **scatter** (`at[idx].set`), which is **~38000× slower than a
-  gather in fp64 on GPU**. Fixed by packing via a gather (`dense_to_tri`, the mirror
-  of the forward `tri_to_dense`) — adjoint **4041 → 187 ms** at nside=512, `map2alm`
-  ~16 s → ~1.3 s. Numerically identical (the gather index is the scatter's inverse).
-- **Off-grid forward** was ~35 s at lmax=1000 (N-independent): the `nufft2d2` grid
-  build was an fp64/complex `C.at[].set` **scatter** = 97 % of it. Replaced by an
-  inverse-index **gather** → ~1.4 ms, so the forward is recursion-bound (~0.5–0.9 s,
-  ~40×). Off-grid is otherwise correct and memory-light (N=1e6 ~1.1 GB); the pointing
-  gradient costs ~1× a forward.
-- **nside=2048 now compiles + runs on GPU.** The ~`nside`-way unrolled fp64 map
-  scatter (fused with the recursion) exceeded `ptxas` (exit 9); the **combined-gather**
-  de-unroll (above) shrinks the module enough to compile. At nside=2048, lmax=1000 on
-  a 20 GB A100 MIG, synth + `map2alm` match CPU to ~1e-13 and the runtime fits the
-  slice (one-time compile is multi-minute, jit-cached).
-
-Every fix here is the same lesson — **fp64/complex `at[idx].set` scatters are
-catastrophic on GPU; use a gather** — and each is bit-identical (gated by the full
-CPU suite + GPU==CPU parity).
+Full method and numbers in `docs/gpu.md`. A100 / V100, fp64: synthesis 14–60× an 8-core
+CPU; fp64/fp32 ≈ 2.2×; GPU == CPU to 1e-14–1e-13 through nside=2048; the off-grid
+forward is recursion-bound (~0.5–0.9 s at lmax=1000). The kernels assemble with gathers,
+never fp64/complex scatters, which are ~10⁴× slower on GPU.
 
 ## Compile time (nside ≥ 1024) — and the persistent cache
 
-The combined-gather de-unroll fixed the nside=2048 *compile failure*, but the first
-compile is still **multi-minute**, and that cost is structural. The on-grid `synth`
+The first compile at nside ≥ 1024 is **multi-minute**, and that cost is structural.
+The on-grid `synth`
 loops over the distinct HEALPix ring lengths (caps 4, 8, …, 4·nside; the equatorial
 belt is one batched group), so it compiles **one ifft kernel per distinct length =
 `n_groups` = nside** of them. Measured first-compile (GPU A100 MIG, fp64,

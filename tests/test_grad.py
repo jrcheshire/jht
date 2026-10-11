@@ -1,7 +1,7 @@
-"""Gate grad (Phase 2): differentiability of the on-grid transforms.
+"""Differentiability of the on-grid transforms.
 
 jht uses JAX's **native** autodiff (no custom VJP/JVP rule); ``adjoint_synthesis``
-stays the strict transpose for operator-form linear algebra (the bk-jax seam / CG).
+stays the strict transpose for operator-form linear algebra (e.g. CG).
 This gate pins the convention and proves AD is correct, in both modes:
 
 * ``jacfwd == jacrev`` on the real-DOF layer (``R^n -> R^m``, unambiguous);

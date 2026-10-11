@@ -35,21 +35,23 @@ in ``[0,1]``):
    bias-for-variance trade), and :func:`constrained_realization` draws posterior
    samples for the full MUSE gradient.  Both run CG in **prior-whitened**
    coordinates ``y = P^-1 x``, ``P = diag(sqrt(Cl))``: the operator becomes
-   ``P A_x P + I`` (eigenvalues >= 1, well conditioned), and zero-power
-   multipoles (``Cl = 0``, e.g. monopole/dipole) have ``P = 0`` exactly -- they
-   are pinned to 0 rather than carried as a huge finite ``1/Cl``, which would
-   otherwise wreck the CG relative-residual stopping rule through the sampler's
-   ``sqrt(1/Cl)``-scaled noise source.
+   ``P A_x P + I`` (eigenvalues >= 1), and zero-power multipoles (``Cl = 0``,
+   e.g. monopole/dipole) have ``P = 0`` exactly -- they are pinned to 0 rather
+   than carried as a huge finite ``1/Cl``, which would break the CG
+   relative-residual stopping rule.  :func:`wiener_preconditioner` builds an
+   optional preconditioner for this system, and ``return_info=True`` reports the
+   iteration count and final residual (:class:`SolveInfo`).
 
-The inner-product subtlety (the bk-jax ``2*conj`` gotcha): ``S``/``S^T`` are
+The inner-product subtlety (the ``2*conj`` convention): ``S``/``S^T`` are
 adjoint in the ``(2 - delta_{m0})``-weighted a_lm inner product, not the
 Euclidean one (see :func:`jht.healpix.adjoint_synthesis`).  So ``A`` is
-Hermitian-PD under ``<.,.>_w``, not Euclidean.  We handle it once with a
+Hermitian-PD under ``<.,.>_w``, not Euclidean.  It is handled once by a
 real-DOF **isometry** ``T: a <-> x`` (:func:`alm_to_real` / :func:`real_to_alm`)
 with ``||x||_2 = ||a||_w``: ``a_{l0} -> a_{l0}`` (real), ``a_{lm>0} -> [sqrt2 Re,
 sqrt2 Im]``, dropping the structurally-zero ``l < |spin|`` modes.  In ``x``-space
-``A_x = T A T^-1`` is real-symmetric-PD in plain Euclidean, so stock
-:func:`jax.scipy.sparse.linalg.cg` is exactly correct.
+``A_x = T A T^-1`` is real-symmetric-PD in plain Euclidean, so plain CG
+(:func:`jax.scipy.sparse.linalg.cg`, or jht's preconditioned CG) is exactly
+correct.
 
 Library code does not enable x64; callers opt in per entry point (x64 is needed
 for the deep accuracy here, as elsewhere in jht).
@@ -57,7 +59,8 @@ for the deep accuracy here, as elsewhere in jht).
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -273,6 +276,148 @@ def _rhs_x(maps, w_pix, nside: int, lmax: int, spin: int) -> jax.Array:
 
 
 # --------------------------------------------------------------------------- #
+# preconditioned CG with convergence diagnostics, and the Wiener preconditioner
+# --------------------------------------------------------------------------- #
+class SolveInfo(NamedTuple):
+    """CG convergence diagnostics: iterations run and the final ``||r|| / ||b||``.
+
+    ``rel_residual > tol`` means the solve stopped at ``max_iter`` unconverged.  Both are
+    arrays (per lane under ``vmap``).
+    """
+
+    n_iter: jax.Array
+    rel_residual: jax.Array
+
+
+class WienerPreconditioner(NamedTuple):
+    """``M^-1`` for the whitened Wiener operator ``P A_x P + I``, from :func:`wiener_preconditioner`.
+
+    ``M`` is diagonal, ``1 + Cl * nbar``, except on the DOFs ``low_idx`` (``l <=
+    ell_split``), where it is the exact operator block; ``diag_inv`` and ``low_inv`` hold
+    the inverses.
+    """
+
+    diag_inv: jax.Array
+    low_idx: jax.Array
+    low_inv: jax.Array
+
+
+def _apply_precond(p: WienerPreconditioner, r: jax.Array) -> jax.Array:
+    """``M^-1 r``: diagonal everywhere, then the exact low-l block on ``low_idx``."""
+    return (r * p.diag_inv).at[p.low_idx].set(p.low_inv @ r[p.low_idx])
+
+
+def _pcg(a_op, b, minv, x0, tol: float, max_iter: int):
+    """Preconditioned CG (``lax.while_loop``) -> ``(x, n_iter, ||r||/||b||)``.
+
+    Same stopping rule as :func:`jax.scipy.sparse.linalg.cg`: stop once
+    ``||r||^2 <= tol^2 ||b||^2`` or after ``max_iter`` iterations.
+    """
+    x = jnp.zeros_like(b) if x0 is None else x0
+    r = b if x0 is None else b - a_op(x0)
+    z = minv(r)
+    bs = jnp.vdot(b, b)
+    thresh = tol**2 * bs
+
+    def cond(s):
+        k, _, _, _, _, _, rs = s
+        return (k < max_iter) & (rs > thresh)
+
+    def body(s):
+        k, x, r, z, d, rz, _ = s
+        ad = a_op(d)
+        alpha = rz / jnp.vdot(d, ad)
+        x, r = x + alpha * d, r - alpha * ad
+        z = minv(r)
+        rz_new = jnp.vdot(r, z)
+        return k + 1, x, r, z, z + (rz_new / rz) * d, rz_new, jnp.vdot(r, r)
+
+    k, x, *_, rs = jax.lax.while_loop(cond, body, (0, x, r, z, z, jnp.vdot(r, z), jnp.vdot(r, r)))
+    rel = jnp.where(bs > 0, jnp.sqrt(rs / jnp.where(bs > 0, bs, 1.0)), 0.0)
+    return x, k, rel
+
+
+def _solve(a_op, b, minv, x0, tol: float, max_iter: int):
+    """:func:`_pcg` under ``lax.custom_linear_solve`` -> ``(x, SolveInfo)``.
+
+    Gradients are implicit through ``a_op`` (symmetric), as with jax's ``cg``; the
+    preconditioner is never differentiated.  ``x0`` warm-starts the primal and the
+    transpose solve alike (as jax's ``_isolve`` does).
+    """
+
+    def solve(matvec, rhs):
+        x, k, rel = _pcg(matvec, rhs, minv, x0, tol, max_iter)
+        return x, SolveInfo(k, rel)
+
+    return jax.lax.custom_linear_solve(a_op, b, solve, symmetric=True, has_aux=True)
+
+
+def _precond_fn(precond: WienerPreconditioner | None, lmax: int, spin: int):
+    """The ``M^-1`` callable for :func:`_solve` (identity when ``precond`` is None)."""
+    if precond is None:
+        return lambda r: r
+    nx = n_dof(lmax, spin)
+    if tuple(precond.diag_inv.shape) != (nx,):
+        raise ValueError(
+            f"precond has {precond.diag_inv.shape[0]} DOFs; lmax={lmax}, spin={spin} needs {nx} "
+            "(build it with wiener_preconditioner at the same lmax/spin)"
+        )
+    return partial(_apply_precond, precond)
+
+
+def wiener_preconditioner(
+    signal_cl,
+    nside: int,
+    lmax: int,
+    spin: int = 0,
+    *,
+    inv_noise=None,
+    mask=None,
+    use_weights: bool = True,
+    ell_split: int | None = 32,
+) -> WienerPreconditioner:
+    """Preconditioner for :func:`wiener` / :func:`constrained_realization` at fixed ``N^-1``, ``Cl``.
+
+    ``M = 1 + Cl * nbar`` per DOF, with ``nbar = mean(N^-1) * Npix / 4pi`` the isotropic
+    level of ``S^T N^-1 S`` (the cut enters through the mean), except that the DOFs with
+    ``l <= ell_split`` get the **exact** block of ``P A_x P + I``.  The diagonal alone
+    mis-scales the large-scale modes under a large cut (they see only the prior, not
+    ``nbar``) and converges no faster than plain CG there; the exact low-l block fixes
+    that.  The solution does not depend on the preconditioner, only the iteration count.
+
+    Build it eagerly, once, and reuse it for every solve with the same ``inv_noise`` /
+    ``mask`` and ``signal_cl``.  The low block costs one application of the Wiener
+    operator per DOF: ``(ell_split+1)^2`` for spin 0, ``2((ell_split+1)^2 - 4)`` for spin 2
+    (2170 at the default 32), plus a dense inverse of that size.  ``ell_split=None`` gives
+    the diagonal alone.  The default was tuned on Galactic masks at nside 128 / lmax 192
+    (see ``docs/masked.md``).
+
+    Parameters mirror :func:`wiener`.  Returns a :class:`WienerPreconditioner`.
+    """
+    w_pix = _weight_pix(nside, spin, inv_noise=inv_noise, mask=mask, use_weights=use_weights)
+    pw = _prior_sqrt(signal_cl, lmax, spin)
+    nbar = jnp.mean(w_pix) * (12 * nside * nside) / (4.0 * np.pi)
+    diag_inv = 1.0 / (1.0 + pw**2 * nbar)
+
+    ell = _prior_ell_index(lmax, spin)
+    ell = ell if spin == 0 else np.concatenate([ell, ell])
+    low = np.flatnonzero(ell <= ell_split) if ell_split is not None else np.zeros(0, dtype=int)
+    if low.size == 0:
+        return WienerPreconditioner(diag_inv, jnp.asarray(low, dtype=jnp.int32), jnp.zeros((0, 0), pw.dtype))
+
+    nx = n_dof(lmax, spin)
+
+    @jax.jit
+    def column(j):
+        e = jnp.zeros(nx, dtype=pw.dtype).at[j].set(1.0)
+        return _whitened_op(e, w_pix, pw, nside, lmax, spin)[low]
+
+    g = np.stack([np.asarray(column(int(j)), dtype=np.float64) for j in low], axis=1)
+    low_inv = np.linalg.inv(0.5 * (g + g.T))
+    return WienerPreconditioner(diag_inv, jnp.asarray(low, dtype=jnp.int32), jnp.asarray(low_inv, dtype=pw.dtype))
+
+
+# --------------------------------------------------------------------------- #
 # cut-sky deconvolution (CG on the masked normal equations)
 # --------------------------------------------------------------------------- #
 def deconvolve(
@@ -287,7 +432,8 @@ def deconvolve(
     reg: float = 0.0,
     use_weights: bool = True,
     x0=None,
-) -> jax.Array:
+    return_info: bool = False,
+):
     """Recover the true a_lm from a cut sky by CG on ``S^T(MW)S a = S^T(MW)m``.
 
     Parameters
@@ -300,8 +446,11 @@ def deconvolve(
         Cl-informed prior instead of a scalar -- the Wiener filter -- is
         :func:`wiener`.)
     x0 : optional warm-start a_lm.
+    return_info : also return a :class:`SolveInfo` (iterations, final relative
+        residual) -- the only way to see that ``max_iter`` was hit unconverged.
 
-    Returns the recovered a_lm (``(K,)`` spin-0, ``(2,K)`` spin-2).
+    Returns the recovered a_lm (``(K,)`` spin-0, ``(2,K)`` spin-2), or ``(a_lm,
+    SolveInfo)`` with ``return_info``.
     """
     w_pix = _weight_pix(nside, spin, mask=mask, use_weights=use_weights)
     b_x = _rhs_x(maps, w_pix, nside, lmax, spin)
@@ -310,8 +459,11 @@ def deconvolve(
         return _normal_op(x, w_pix, reg, nside, lmax, spin)
 
     x_init = None if x0 is None else alm_to_real(x0, lmax, spin)
-    x_sol, _ = cg(a_op, b_x, x0=x_init, tol=tol, maxiter=max_iter)
-    return real_to_alm(x_sol, lmax, spin)
+    if not return_info:
+        x_sol, _ = cg(a_op, b_x, x0=x_init, tol=tol, maxiter=max_iter)
+        return real_to_alm(x_sol, lmax, spin)
+    x_sol, info = _solve(a_op, b_x, lambda r: r, x_init, tol, max_iter)
+    return real_to_alm(x_sol, lmax, spin), info
 
 
 # --------------------------------------------------------------------------- #
@@ -330,7 +482,9 @@ def wiener(
     tol: float = 1e-8,
     use_weights: bool = True,
     x0=None,
-) -> jax.Array:
+    precond: WienerPreconditioner | None = None,
+    return_info: bool = False,
+):
     """Wiener-filter / MAP a_lm: solve ``(S^T N^-1 S + C^-1) a = S^T N^-1 m``.
 
     The noise-aware posterior mean for the data model ``m = S a + n`` with
@@ -356,8 +510,16 @@ def wiener(
         then ``mask`` is required.
     max_iter, tol : CG budget and relative residual tolerance.
     x0 : optional warm-start a_lm.
+    precond : a :class:`WienerPreconditioner` from :func:`wiener_preconditioner` built
+        for the same ``inv_noise``/``mask``, ``signal_cl``, ``lmax`` and ``spin``.  It
+        changes the iteration count, not the solution.
+    return_info : also return a :class:`SolveInfo` (iterations, final relative
+        residual) -- the only way to see that ``max_iter`` was hit unconverged.
 
-    Returns the Wiener-mean a_lm (``(K,)`` spin-0, ``(2,K)`` spin-2).
+    With neither ``precond`` nor ``return_info`` the solve is stock
+    :func:`jax.scipy.sparse.linalg.cg`; otherwise it is jht's preconditioned CG under the
+    same implicit-gradient rule.  Returns the Wiener-mean a_lm (``(K,)`` spin-0,
+    ``(2,K)`` spin-2), or ``(a_lm, SolveInfo)`` with ``return_info``.
     """
     w_pix = _weight_pix(nside, spin, inv_noise=inv_noise, mask=mask, use_weights=use_weights)
     pw = _prior_sqrt(signal_cl, lmax, spin)
@@ -367,8 +529,12 @@ def wiener(
         return _whitened_op(y, w_pix, pw, nside, lmax, spin)
 
     y_init = None if x0 is None else _whiten_x0(x0, pw, lmax, spin)
-    y_sol, _ = cg(a_op, b_y, x0=y_init, tol=tol, maxiter=max_iter)
-    return real_to_alm(pw * y_sol, lmax, spin)
+    if precond is None and not return_info:
+        y_sol, _ = cg(a_op, b_y, x0=y_init, tol=tol, maxiter=max_iter)
+        return real_to_alm(pw * y_sol, lmax, spin)
+    y_sol, info = _solve(a_op, b_y, _precond_fn(precond, lmax, spin), y_init, tol, max_iter)
+    alm = real_to_alm(pw * y_sol, lmax, spin)
+    return (alm, info) if return_info else alm
 
 
 def constrained_realization(
@@ -385,7 +551,9 @@ def constrained_realization(
     tol: float = 1e-8,
     use_weights: bool = True,
     x0=None,
-) -> jax.Array:
+    precond: WienerPreconditioner | None = None,
+    return_info: bool = False,
+):
     """One posterior draw ``a ~ N(a_wiener, (S^T N^-1 S + C^-1)^-1)`` (a constrained realization).
 
     Same system as :func:`wiener` -- solved in the same prior-whitened coordinates
@@ -401,14 +569,13 @@ def constrained_realization(
     P A_x P + I_phys``, so ``x = P y`` has mean ``a_wiener`` and covariance
     ``(A_x + D)^-1`` on the physical modes -- the posterior.  (The ``s1``
     factorization is exact because ``T S^T`` is the Euclidean transpose of
-    ``S T^-1`` -- the gated operator symmetry.  Whitening also keeps the CG
-    stopping rule meaningful: the unwhitened sampler injected ``sqrt(1/Cl)``-scaled
-    noise into the RHS, which for ``Cl = 0`` multipoles -- e.g. a zeroed
-    monopole/dipole -- inflated ``||b||`` by ~1e15 and made CG return garbage for
-    the physical modes.)  ``key`` is a ``jax.random`` PRNG key; one call returns
-    one draw.
+    ``S T^-1`` -- the gated operator symmetry.  In unwhitened coordinates the source
+    would carry ``sqrt(1/Cl)``-scaled noise, which for ``Cl = 0`` multipoles inflates
+    ``||b||`` enough to break the relative-residual stopping rule; whitening avoids
+    that.)  ``key`` is a ``jax.random`` PRNG key; one call returns one draw.
 
-    Parameters mirror :func:`wiener`.  Returns a posterior a_lm sample.
+    Parameters (including ``precond`` / ``return_info``) mirror :func:`wiener`.  Returns
+    a posterior a_lm sample, or ``(sample, SolveInfo)`` with ``return_info``.
 
     .. note::
        This is a genuine posterior draw only when ``inv_noise`` (a real noise
@@ -435,5 +602,9 @@ def constrained_realization(
         return _whitened_op(y, w_pix, pw, nside, lmax, spin)
 
     y_init = None if x0 is None else _whiten_x0(x0, pw, lmax, spin)
-    y_sol, _ = cg(a_op, rhs, x0=y_init, tol=tol, maxiter=max_iter)
-    return real_to_alm(pw * y_sol, lmax, spin)
+    if precond is None and not return_info:
+        y_sol, _ = cg(a_op, rhs, x0=y_init, tol=tol, maxiter=max_iter)
+        return real_to_alm(pw * y_sol, lmax, spin)
+    y_sol, info = _solve(a_op, rhs, _precond_fn(precond, lmax, spin), y_init, tol, max_iter)
+    sample = real_to_alm(pw * y_sol, lmax, spin)
+    return (sample, info) if return_info else sample

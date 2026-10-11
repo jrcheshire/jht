@@ -8,9 +8,8 @@ smooth ES-kernel weights -- no custom rule, ``jacfwd == jacrev`` preserved.
 
 The kernel is the FINUFFT "exponential of semicircle"
 ``psi(t) = exp(beta (sqrt(1 - (2t/W)^2) - 1))`` (Barnett, Magland & af Klinteberg
-2019, arXiv:1808.06736).  The accuracy-vs-(sigma, W) trade was pinned empirically
-in the M0 spike (abs err vs the exact direct sum, lmax<=512): W=14/sigma=2 reaches
-<=6e-10; W=12 ~5e-9; W=16 sits at the fp64 roundoff floor.
+2019, arXiv:1808.06736).  Measured accuracy vs the exact direct sum (lmax <= 512):
+W=14/sigma=2 reaches <= 6e-10; W=12 ~5e-9; W=16 sits at the fp64 roundoff floor.
 
 Convention: modes are *centered*, ``k = -N//2 .. -N//2 + N - 1``; points
 ``x, y`` live on the ``[0, 2pi)`` torus.  ``nufft2d2`` evaluates
@@ -29,7 +28,7 @@ import numpy as np
 TWO_PI = 2.0 * np.pi
 
 # requested epsilon -> (W, sigma).  Keyed by *achievable* accuracy; the cheapest
-# (smallest W) entry meeting the request is selected.  Tuned in scripts/offgrid_spike.py.
+# (smallest W) entry meeting the request is selected.  Measured with scripts/offgrid_sweep.py.
 _KERNEL_DB: dict[float, tuple[int, float]] = {
     1e-4: (6, 2.0),
     1e-6: (8, 2.0),
@@ -118,9 +117,9 @@ def nufft_plan(Nk: int, Nm: int, eps: float) -> NufftPlan:
     bk, bm = _beta(W, sigma), _beta(W, sigma)
     kbins = np.arange(-(Nk // 2), -(Nk // 2) + Nk) % nk
     mbins = np.arange(-(Nm // 2), -(Nm // 2) + Nm) % nm
-    # Inverse fill index so nufft2d2 builds the oversampled grid by a GATHER, not an
-    # fp64/complex SCATTER (`C.at[].set`) -- the scatter was 97% of the off-grid forward
-    # on GPU (~25000x the gather; see scripts/profile_offgrid_forward.py).  Centered modes
+    # Inverse fill index so nufft2d2 builds the oversampled grid by a GATHER: an
+    # fp64/complex scatter (`C.at[].set`) is ~10^4x slower on GPU and would dominate
+    # the off-grid forward (scripts/profile_offgrid_forward.py).  Centered modes
     # at sigma>=2 are collision-free in the oversampled grid, so the gather reproduces the
     # scatter exactly (asserted below).
     dest = (kbins[:, None] * nm + mbins[None, :]).ravel()
@@ -157,8 +156,8 @@ def nufft2d2(plan: NufftPlan, coeffs, x, y):
     ``coeffs`` (Nk, Nm) complex (centered modes); ``x, y`` (Npts,) on ``[0,2pi)``.
     """
     c = coeffs / jnp.asarray(plan.corr_k)[:, None] / jnp.asarray(plan.corr_m)[None, :]
-    # Build the oversampled grid by a GATHER (the inverse fill index lives in the plan);
-    # the equivalent fp64/complex `.at[].set` scatter was 97% of the GPU forward.
+    # Build the oversampled grid by a GATHER (the inverse fill index lives in the plan),
+    # not an fp64/complex `.at[].set` scatter, which is ~10^4x slower on GPU.
     C = jnp.where(
         jnp.asarray(plan.fill_mask), c.ravel()[jnp.asarray(plan.fill_src)], 0.0 + 0.0j
     ).reshape(plan.nk, plan.nm)

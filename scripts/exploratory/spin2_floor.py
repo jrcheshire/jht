@@ -1,10 +1,8 @@
-"""Phase-0 L2 measurement: the spin-2 HEALPix inverse floor, per (l, m).
+"""The spin-2 HEALPix inverse floor, per (l, m).
 
-THE make-or-break: s2fft's spin-2 inverse failed at l=8/16/32 with m<l errors of
-13-35% (m=l passed). This sweeps the same single modes through jht's
-synthesize -> analyze round trip and reports the error vs m -- it must be FLAT
-across m (no s2fft-style m<l defect), at the HEALPix ~1e-3 floor, improving with
-Jacobi iteration.
+Sweeps single modes at l = 8/16/32 (where s2fft's spin-2 inverse shows m<l errors of
+13-35%) through jht's synthesize -> analyze round trip and reports the error vs m. It
+should be flat across m at the HEALPix ~1e-3 floor and improve with Jacobi iteration.
 
 For speed this caches the validated lambda tables (from jht._recursion) once and
 does the FFT assembly in numpy; the formulas are identical to the committed JAX

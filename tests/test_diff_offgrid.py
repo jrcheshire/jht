@@ -94,8 +94,8 @@ def test_loc_grad_finite_at_grid_aligned_points(spin):
     """Pointing gradients stay finite when theta/phi land exactly on fine-grid nodes.
 
     theta in {0, pi}, phi = 0, and exact CC-ring/azimuth nodes put a stencil point
-    exactly on the ES-kernel support boundary, where the gradient used to be inf
-    (the kernel now excludes the boundary; see ``jht._nufft._es_kernel``).
+    exactly on the ES-kernel support boundary, where a naive kernel derivative is
+    inf; the kernel excludes the boundary (``jht._nufft._es_kernel``).
     """
     x = jnp.asarray(_rand_x(spin, 40 + spin))
     alm = real_to_alm(x, LMAX, spin)

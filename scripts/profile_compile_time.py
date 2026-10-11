@@ -1,25 +1,20 @@
-"""Characterize + decompose the nside>=1024 on-grid COMPILE time (v0.1.1 item 2).
+"""Characterize and decompose the nside>=1024 on-grid compile time.
 
-The nside=2048 ptxas-FAIL was fixed (combined-gather de-unroll, commit 83993fa), but
-the *compile* is still multi-minute at nside>=1024.  Hypothesis: the per-ring-length
-FFT unroll -- `synth`'s `for g in groups:` loop compiles one ifft kernel per distinct
-HEALPix ring length (caps 4, 8, ..., 4*nside; the equatorial belt is one batched
-group), so ~nside FFT kernels.  The per-length FFTs are unavoidable (a length-N ring
-needs an exact length-N FFT; they cannot be padded to a common length), but the
-*number of distinct compilations* is the suspected cost.  This probe measures HOW the
-compile scales with nside and WHICH half -- the Legendre recursion or the FFT-unroll
-assembly -- dominates, so the fix can target the real cost (split/cache the
-sub-compiles, persistent compilation cache, or a single batched DFT matmul for the
-short cap rings -- exact, O(sum N^2), one kernel instead of many tiny FFTs).
+The default `synth` compiles one ifft kernel per distinct HEALPix ring length (caps
+4, 8, ..., 4*nside; the equatorial belt is one batched group), so ~nside FFT kernels;
+a length-N ring needs an exact length-N FFT, so they cannot be padded to a common
+length.  This probe measures how the compile scales with nside and which half -- the
+Legendre recursion or the FFT-unroll assembly -- dominates (see
+``docs/performance.md`` "Compile time").
 
 Per nside it reports:
   * structure : n_groups (= distinct ring lengths = the FFT-kernel/unroll count),
     short (N<=--short-thresh, the DFT-matmul-fallback candidates), belt (N x n_rings).
   * synth_c/synth_r : compile(+first run) / steady run of the REAL jht.synthesis.
   * asm_c /asm_r    : the FFT-unroll assembly alone (synth's `for g` loop on a
-    precomputed G) -- the suspected compile dominator.
+    precomputed G).
   * rec_c /rec_r    : the Legendre recursion alone (synth_contract_eo on a precomputed
-    dense alm) -- the other half; a single scan, NOT unrolled, expected to compile fast.
+    dense alm) -- a single scan, not unrolled.
 
 `synth_c ~= rec_c + asm_c` attributes the compile (XLA fuses, so approximate).  In-band
 ptxas/OOM reporting.  spin-0 (`synth`); spin-2 (`synth2`) is the same unroll, two

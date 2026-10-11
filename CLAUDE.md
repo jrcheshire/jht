@@ -1,195 +1,77 @@
-# jht — JAX Harmonic Transforms
+# CLAUDE.md
 
-JAX-native spherical harmonic transforms. GPU-capable, fully differentiable,
-and **dependency-controlled** — pure JAX + numpy at runtime, no compiled C++
-extension and no heavyweight third-party SHT library. Born from the BICEP/Keck
-`bk-jax` pipeline's need for a transform it can run on GPU, differentiate
-through, and *own* the numerics of.
+Guidance for Claude Code when working in this repository.
 
-**Status (2026-06-06): scaffolding only.** This file, `ROADMAP.md`, and the
-`docs/` notes were written to carry the design into a future development
-session. No transforms are implemented yet. **Read `ROADMAP.md` next; the first
-action is the Phase-0 feasibility spike.**
+## What jht is
 
----
+JAX-native spherical harmonic transforms for **spin-0 and spin-2** fields on the
+**HEALPix RING** grid: GPU-capable, fully differentiable, pure JAX + NumPy at runtime
+(no compiled extension, no third-party SHT library). Validated to nside ≤ 4096 /
+ℓ_max ≲ 6000. Published on PyPI as `jaxht`; the import name is `jht`.
 
-## What jht is, in one paragraph
+Out of scope: arbitrary spin, non-HEALPix samplings, and drop-in replacement of a
+purity-critical (~1e-4) production transform. Keep the core consumer-agnostic:
+nothing in `src/` should assume a particular downstream pipeline.
 
-A focused, clean-room implementation of the forward and inverse spherical
-harmonic transform (map ↔ aₗₘ) for **spin-0 and spin-2** fields on the
-**HEALPix ring** pixelization, in the **BICEP/Keck angular regime** and beyond
-(validated to nside ≤ 4096, ℓ_max ≲ 6000). It exists to serve the GPU / differentiable
-tier of analysis that a CPU-only C++ transform structurally cannot. It is
-*not* an attempt to reimplement a general all-spin / all-sampling library.
+## Layout
 
-## Scope
+| module | contents |
+|---|---|
+| `healpix.py` | on-grid `synthesis` and its exact transpose `adjoint_synthesis`; ring geometry, aₗₘ packing |
+| `_recursion.py` | normalized associated-Legendre ℓ-recursion with branch-free log-renormalization |
+| `_azimuth.py` | per-ring azimuthal FFTs (unrolled, or the looped/chirp-z mode for O(1) compiled kernels) |
+| `_analysis.py`, `weights.py` | `analysis` / `map2alm` (ring quadrature weights + Jacobi iteration), `bare_analysis` |
+| `diff.py` | real-DOF transforms (`synthesis_real`, `analysis_real`, …), `bandpower`, reverse-only `*_vjp` |
+| `offgrid.py`, `_nufft.py` | `synthesis_general` / `adjoint_synthesis_general` at arbitrary pointings (spin 0–3) |
+| `masked.py` | `pseudo_alm`, `deconvolve`, `wiener`, `constrained_realization`, `wiener_preconditioner`, `SolveInfo` |
+| `_cache.py` | opt-in persistent compilation cache |
 
-**In scope (the target):**
-- Spin-0 and spin-2 (T and Q/U / E/B) transforms, forward and adjoint.
-- HEALPix ring pixelization.
-- BK regime and beyond: validated to nside ≤ 4096, ℓ_max ≲ 6000; partial-sky (masked) analysis.
-- GPU execution (the primary motivation) and JAX autodiff (alm-linear).
-- Validation to the relevant accuracy tier against ducc0 / healpy.
+Docs: `docs/design.md` (design, conventions, differentiability), `docs/accuracy.md`
+(the accuracy contract and the measured HEALPix floor), `docs/masked.md`,
+`docs/offgrid.md`, `docs/performance.md`, `docs/gpu.md`, `docs/consumers.md` (the
+operator seam a downstream depends on).
 
-**Out of scope (for now — keep the surface small):**
-- Arbitrary spin-s, non-HEALPix samplings, extreme ℓ_max. We are not chasing
-  s2fft-style generality.
-- **Off-grid synthesis (the NUFFT)** — synthesis at arbitrary detector
-  pointings, i.e. the `bk-jax` *sim-forward* path. That is a distinct
-  capability (a JAX NUFFT) and a separate, later phase. "JAX-native SHT" ≠
-  "escape ducc everywhere": jht replaces the **on-grid** SHT only.
-- Being gratuitously BK-coupled. Write the core so BK assumptions live at the
-  edges; the transform itself should be reusable.
+## Conventions (pinned in `docs/design.md`)
 
-## Why jht exists (decision record — see `docs/motivation.md` for the full story)
+- aₗₘ: healpy m-major triangular packing, complex, m ≥ 0; orthonormal Yₗₘ with the
+  Condon–Shortley phase. Spin 2 is `(2, K)` (E, B) and maps are `(2, Npix)` (Q, U),
+  HEALPix-internal (COSMO) polarization.
+- `adjoint_synthesis` is the exact transpose in the `(2 − δ_m0)`-weighted aₗₘ inner
+  product, not the Euclidean one. The real-DOF isometry (`alm_to_real` /
+  `real_to_alm`) makes operators real-symmetric in plain Euclidean form; use it for
+  linear algebra and gradients.
+- **float64 is opt-in per entry point** (`jax.config.update("jax_enable_x64", True)`
+  in tests and scripts). Library code never touches global JAX config.
+- Static per-(nside, lmax) tables are built in-trace or held as NumPy, never cached as
+  jnp arrays: a cache first populated under a trace leaks tracers.
 
-The recurring constraint is a single C++ black box (ducc0) that does the
-harmonic transforms. It is excellent but:
-- **CPU-only.** The forecast / field-level-inference (MUSE) ambitions are
-  GPU-hungry; ducc can't go there.
-- **A black box.** ducc is vendored in `bk-jax` as a submodule wrapped in a
-  custom XLA FFI — that is *build* control, not *code* control. Its internals
-  are unmodifiable C++, and off-grid pointing tangents raise
-  `NotImplementedError`.
-- **A build tax.** The C++/scikit-build/CUDA toolchain has repeatedly broken
-  CI and local installs.
+## Validation contract
 
-The leading JAX-native alternative, **s2fft**, was evaluated and rejected:
-its **spin-2 HEALPix inverse has a structural precision defect** (measured
-3–28% error at production ℓ, vs its own documented ~1e-3), and as of
-2026-06 it is **still at v1.4.0 (12 Feb 2026)** with the relevant issues triaged
-and parked ("no time") and a stagnant PR queue. (The 2026-05 evaluation spike
-ran on v1.3.0; the v1.3.0→v1.4.0 diff is CUDA/build-only, so the spin-2 accuracy
-is byte-identical — the date in the original record was wrong, the conclusion
-stands.) **Do not depend on s2fft, and do not fork it** (owning a large codebase
-you find broken is the opposite of dependency control). Clean-room, *informed
-by* the published methods (libsharp / Kostelec–Rockmore for the spin-2-safe
-ℓ-recursion; Price & McEwen for the JAX branch-free renorm *technique* only —
-explicitly NOT their m-recursion, which is the suspected defect home), is the
-control-aligned path.
+- Every transform is gated against **healpy and ducc0** at an a-priori tolerance,
+  recorded in the relevant doc's gate table.
+- Tolerances are not relaxed to make a test pass. Find the mechanism first; log any
+  residual numeric mismatch in `DISCREPANCIES.md`.
+- Gate spin-2 analysis per (ℓ, m) below the ℓ ≤ 1.5·nside band-limit ceiling, so
+  recursion, quadrature and ceiling errors stay separate.
+- Iterative solvers are gated against a dense oracle at small nside.
 
-Crucially, the s2fft evaluation **validated the architecture**: a JAX-native
-SHT integrates cleanly (JIT-clean, spin-0 machine-precision, finite/well-scaled
-VJP). The concept works; one library's spin-2 corner does not.
+## Tooling
 
-## Relationship to bk-jax (the consumer)
-
-- jht is a **future dependency** of `bk-jax` (`~/bicepkeck/bk-jax`), added as a
-  path/pip dependency once Phase 0–1 land. It is developed and versioned here,
-  independently — that's the point.
-- **ducc stays in bk-jax for the production path.** The ~1e-4 purity /
-  E→B-leakage-critical bandpower pipeline keeps using ducc; that accuracy is
-  person-decades of hard-won tuning and is not the thing to risk first.
-- **jht earns its keep in the tier ducc can't serve:** GPU forecast sweeps,
-  the MUSE inner Wiener solve, and (eventually) fully-differentiable geometry —
-  where the HEALPix ~1e-3 accuracy floor is acceptable.
-- `bk-jax` already dispatches its transform via a `BK_JAX_SHT_BACKEND` env var;
-  jht becomes a new backend option there (Phase 3).
-
-## Accuracy philosophy (the validation contract)
-
-This is the make-or-break of the project; treat it with the same rigor `bk-jax`
-applies — **a-priori tolerances, gate-driven, and tolerances are NOT relaxed
-without an explicit discussion and sign-off.**
-
-- HEALPix has **no sampling theorem**, so any HEALPix SHT is approximate. The
-  fundamental floor without ring weights is ~1e-3; ducc reaches ~1e-4 and
-  better via **ring quadrature weights + Jacobi (map2alm-style) iteration**.
-- jht's first target is **reach the HEALPix floor with no structural defect**
-  (i.e. spin-2 must NOT show s2fft's 3–28% — it must sit at ~1e-3 like spin-0),
-  then close toward ducc by adding ring weights + iteration.
-- **Spin-2 analysis is the gate.** It is exactly what s2fft got wrong — and the
-  2026-06 dive pinned the defect to the *analysis quadrature* (missing ring
-  weights + polar folding + a stalling unweighted iteration), NOT the recursion
-  (see the crux section). Gate the weighted spin-2 round-trip **per-(ℓ,m), below
-  the ℓ≤1.5·nside band-limit ceiling** so recursion / quadrature / ceiling errors
-  are never conflated; if it reaches the floor flat across all m (no s2fft-style
-  m<ℓ leakage), the project is viable.
-- Every transform lands with a parity test vs **both** healpy and ducc0
-  (cross-checking conventions), at a documented tolerance. Log any residual
-  mismatch (a `DISCREPANCIES.md`, mirroring bk-jax discipline) rather than
-  burying it.
-
-## The crux technical risk
-
-Two distinct risks — and the 2026-06 literature dive **corrected which one is
-make-or-break** (full reasoning in `docs/design.md` and the session plan
-`~/.claude/plans/yeah-let-s-get-to-lovely-feather.md`):
-
-1. **Recursion stability to ℓ_max~1000 — necessary, but NOT s2fft's bug.**
-   Associated-Legendre / Wigner-d recursions underflow at high ℓ; the solved
-   technique is libsharp-style enhanced-exponent ("X-number") scaling. jht uses
-   the libsharp 3-term ℓ-recursion (Kostelec–Rockmore), in the increasing-ℓ
-   direction, with a **branch-free per-step log-renorm** — a *known, solved*
-   problem with a published spin-2≡spin-0 accuracy proof (libsharp §5.1.2).
-   This is **table-stakes, not the differentiator**: s2fft already rescales its
-   recursion and still fails spin-2, so getting the recursion right is necessary
-   but not sufficient.
-
-2. **Spin-2 HEALPix *analysis quadrature* — the actual make-or-break.** s2fft's
-   defect lives here, not in the recursion: its spin-2 single-mode errors appear
-   at ℓ=8/16/32 and *shrink* with ℓ (35→28→22%), spin-0 (identical recursion) is
-   machine-precision, and the failures sit far below the ℓ≤1.5·nside ceiling —
-   all incompatible with recursion underflow, all consistent with an
-   aliasing/folding + missing-weights defect in the spin-2 map2alm path. jht's
-   gate is the **weighted spin-2 round-trip, validated per-(ℓ,m) below the
-   band-limit ceiling**, so recursion / quadrature / ceiling errors are never
-   conflated. Test both risks explicitly and early (Phase 0).
-
-## Conventions — pin and document these from day one
-
-These have repeatedly bitten `bk-jax`; do not leave them implicit.
-
-- **Polarization sign:** HEALPix-internal vs IAU U-sign. Decide the internal
-  convention, document it, and cross-validate against healpy (`pol=True`) and
-  ducc. (bk-jax stores HEALPix-internal and flips U at I/O boundaries.)
-- **Spin sign convention** (spin +2 vs −2 / E,B sign).
-- **aₗₘ layout** (healpy m-major triangular packing; real vs complex; which ℓ,m
-  ordering) and **normalization** (4π vs orthonormal). Mirror healpy/ducc and
-  document the exact mapping.
-- **Differentiability convention:** the on-grid SHT is alm-linear, so JVP/VJP
-  are straightforward — but note the **JAX-VJP-convention vs strict-math-adjoint**
-  subtlety (the `2·conj(·)` on m>0 modes) that bit bk-jax. Register transposes
-  deliberately and test `jacfwd ≡ jacrev` and the inner-product adjoint
-  identity.
-
-## Tooling & conventions
-
-- **Pixi** is the env tool (`pixi run test|lint|format|typecheck`). Standard.
-- **Pure Python / JAX — no compiled extension.** This is a deliberate feature:
-  zero build-toolchain pain, unlike bk-jax's vendored-ducc FFI. Keep it that
-  way; if a kernel ever truly needs C++/CUDA, that's a major decision, not a
-  drive-by.
-- **Runtime deps = jax + numpy only.** ducc0 / healpy are dev/test oracles in
+- Pixi: `pixi run test` (full suite), `pixi run test-fast` (excludes `slow`),
+  `pixi run lint`, `pixi run typecheck`. Tests marked `heavy` exceed a hosted CI
+  runner's memory and run locally only.
+- Runtime dependencies are `jax` + `numpy` only; healpy / ducc0 are test oracles in
   the pixi env, never `[project.dependencies]`.
-- **No Jupyter notebooks for working code** — scripts + `ipython %run` for
-  exploration (user-level standard).
-- **JAX float64 is opt-in per entry point** (`jax.config.update("jax_enable_x64",
-  True)` in tests/scripts; library code does not touch global config) — same
-  rule as bk-jax; SHT accuracy work needs float64.
+- GPU env: `pixi run -e gpu ...` on an NVIDIA machine (see `docs/gpu.md`).
+- Scripts + `ipython %run` for exploration; no notebooks.
+- Before committing: `lint` + `typecheck` + `test-fast`. Commit messages: one terse line.
+- Releases: bump `__version__` in `src/jht/__init__.py` (the single source; hatch reads
+  it) and `tests/test_api.py::test_version`, date the CHANGELOG section, tag `vX.Y.Z`;
+  `.github/workflows/release.yml` builds and publishes on the tag. Author metadata lives
+  in `pyproject.toml` and `CITATION.cff`; keep them consistent.
 
-## Attribution (release blocker)
+## Writing style for code and docs
 
-Published / shippable author fields must read **"James Cheshire"**
-(`cheshire@caltech.edu`) — already set in `pyproject.toml` `authors`/
-`maintainers`. "jamie" is fine only in the local git author config. This repo
-may become a published dependency; verify the name before any tag / build /
-publish. ("Jamie" must never appear in a shipped artifact.)
-
-## Dev workflow (per transform)
-
-1. Implement the transform over typed JAX arrays (parametric where a systematic
-   knob could later live).
-2. Gate it against healpy **and** ducc0 at an a-priori documented tolerance.
-3. Pin & document the conventions it assumes (`docs/design.md`).
-4. `pixi run lint` + `typecheck` before committing; terse single-line commit
-   messages (user preference).
-5. Log any numeric mismatch in `DISCREPANCIES.md`, don't bury it as a TODO.
-
-## Pointers
-
-- `ROADMAP.md` — phased plan + hard gates + open questions.
-- `docs/motivation.md` — why jht exists (full decision record).
-- `docs/design.md` — technical design, accuracy tiers, conventions, algorithm.
-- Consumer / sibling context: `~/bicepkeck/bk-jax` (the pipeline that motivates
-  jht; do not make jht depend on reading bk-jax to be understood).
+Docstrings and docs describe what the code does now: purpose, call signature,
+conventions, cost, and the reason for any non-obvious choice. Development history
+belongs in git and `CHANGELOG.md`, not in docstrings, comments, or docs.
