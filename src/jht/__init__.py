@@ -64,7 +64,7 @@ from .masked import (
 from .offgrid import adjoint_synthesis_general, synthesis_general
 from .weights import pixel_weights, ring_weights
 
-__version__ = "0.3.0"  # single source of truth; pyproject reads this via hatch
+__version__ = "0.4.0"  # single source of truth; pyproject reads this via hatch
 __author__ = "James Cheshire"
 __email__ = "cheshire@caltech.edu"
 

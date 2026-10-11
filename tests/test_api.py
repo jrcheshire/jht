@@ -34,7 +34,7 @@ EXPECTED = {
 
 
 def test_version():
-    assert jht.__version__ == "0.3.0"
+    assert jht.__version__ == "0.4.0"
 
 
 def test_all_names_present_and_callable():
