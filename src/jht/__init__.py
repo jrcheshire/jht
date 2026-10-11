@@ -50,6 +50,8 @@ from .healpix import (
     synthesis,
 )
 from .masked import (
+    SolveInfo,
+    WienerPreconditioner,
     alm_to_real,
     constrained_realization,
     deconvolve,
@@ -57,6 +59,7 @@ from .masked import (
     pseudo_alm,
     real_to_alm,
     wiener,
+    wiener_preconditioner,
 )
 from .offgrid import adjoint_synthesis_general, synthesis_general
 from .weights import pixel_weights, ring_weights
@@ -85,6 +88,9 @@ __all__ = [
     "deconvolve",  # cut-sky CG deconvolution
     "wiener",  # Wiener filter / MUSE inner solve (Cl prior + N^-1)
     "constrained_realization",  # posterior draw (constrained realization)
+    "wiener_preconditioner",  # l-diagonal + exact low-l block M^-1 for wiener / CR
+    "WienerPreconditioner",
+    "SolveInfo",  # CG diagnostics (iterations, final relative residual)
     # differentiable (real-DOF) interface
     "synthesis_real",  # S o T^-1 : R^n -> map
     "analysis_real",  # T o analysis : map -> R^n

@@ -40,6 +40,7 @@ from jht.masked import (  # noqa: E402
     n_dof,
     real_to_alm,
     wiener,
+    wiener_preconditioner,
 )
 
 PRIOR_TOL = 1e-12  # _prior_sqrt == independent ref (layout)
@@ -446,3 +447,264 @@ def test_wiener_differentiable():
     assert np.max(np.abs(g - gj)) <= 1e-9 * (1.0 + np.max(np.abs(g)))
     gm = jax.grad(lambda mm: jnp.real(jnp.sum(jnp.abs(wiener(mm, cl0, nside, lmax, spin=spin, inv_noise=ninv, max_iter=200, tol=1e-10)) ** 2)))(m)
     assert np.all(np.isfinite(np.asarray(gm)))
+
+
+# --------------------------------------------------------------------------- #
+# W-precond: wiener_preconditioner + jht's preconditioned CG (SolveInfo diagnostics).
+# The preconditioner changes the iteration count, never the solution, so every gate
+# here is against the dense solve or the unpreconditioned path.
+# --------------------------------------------------------------------------- #
+def _cl_jax(cl, spin: int):
+    return jnp.asarray(cl) if spin == 0 else (jnp.asarray(cl[0]), jnp.asarray(cl[1]))
+
+
+def _ell_ref(lmax: int, spin: int) -> np.ndarray:
+    """Independent per-DOF multipole (both channels for spin 2)."""
+    ms, ls = _mvals(lmax), _lvals(lmax)
+    active = ls >= abs(spin)
+    ell = np.concatenate([ls[active & (ms == 0)], ls[active & (ms > 0)], ls[active & (ms > 0)]])
+    return ell if spin == 0 else np.concatenate([ell, ell])
+
+
+def _dense_whitened(nside: int, lmax: int, spin: int, ninv: np.ndarray, cl):
+    """Dense ``P A_x P + I`` and ``pw`` from the explicit synthesis matrix."""
+    S = _dense_S(nside, lmax, spin)
+    A0 = S.T @ (_ninv_flat(ninv, spin)[:, None] * S)
+    pw = _prior_sqrt_ref(cl, lmax, spin)
+    return pw[:, None] * A0 * pw[None, :] + np.eye(pw.size), pw
+
+
+def _dense_wiener_x(nside: int, lmax: int, spin: int, ninv: np.ndarray, cl, m) -> np.ndarray:
+    """``x = P (P A_x P + I)^-1 P b_x`` (pinned modes come out 0)."""
+    M, pw = _dense_whitened(nside, lmax, spin, ninv, cl)
+    nb = _ninv_bcast(ninv, spin)
+    b = np.asarray(alm_to_real(adjoint_synthesis(nb * jnp.asarray(m), nside, lmax, spin), lmax, spin))
+    return pw * np.linalg.solve(M, pw * b)
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+def test_precond_diagonal_matches_ref(spin):
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=21)
+    cl = _signal_cl(lmax, spin)
+    p = wiener_preconditioner(_cl_jax(cl, spin), nside, lmax, spin, inv_noise=ninv, ell_split=None)
+    nbar = ninv.mean() * 12 * nside**2 / (4 * np.pi)
+    ref = 1.0 / (1.0 + _prior_sqrt_ref(cl, lmax, spin) ** 2 * nbar)
+    assert np.max(np.abs(np.asarray(p.diag_inv) - ref)) <= PRIOR_TOL
+    assert p.low_idx.shape == (0,) and p.low_inv.shape == (0, 0)
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+@pytest.mark.parametrize("which", ["binary", "apod"])
+def test_precond_low_block_matches_dense(spin, which):
+    """The low-l block is the exact inverse of the dense ``(P A P + I)[low, low]``."""
+    nside, lmax, ell_split = 8, 8, 4
+    mask = _binary_cap(nside, 0.4) if which == "binary" else _apod_cap(nside, 0.4, 0.4)
+    ninv = _ninv(nside, mask, seed=22)
+    cl = _signal_cl(lmax, spin)
+    p = wiener_preconditioner(_cl_jax(cl, spin), nside, lmax, spin, inv_noise=ninv, ell_split=ell_split)
+    low = np.flatnonzero(_ell_ref(lmax, spin) <= ell_split)
+    assert np.array_equal(np.asarray(p.low_idx), low)
+    M, _ = _dense_whitened(nside, lmax, spin, ninv, cl)
+    ref = np.linalg.inv(M[np.ix_(low, low)])
+    assert np.max(np.abs(np.asarray(p.low_inv) - ref)) <= OP_TOL * (1.0 + np.max(np.abs(ref)))
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+@pytest.mark.parametrize("ell_split", [None, 4, 8])
+@pytest.mark.parametrize("zero_cl", [False, True])
+def test_precond_wiener_matches_dense(spin, ell_split, zero_cl):
+    """Preconditioned wiener == dense solve, incl. pinned zero-Cl modes (returned exactly 0)."""
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=23)
+    cl = _signal_cl_zero(lmax, spin) if zero_cl else _signal_cl(lmax, spin)
+    cl_j = _cl_jax(cl, spin)
+    m = np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 24)), nside, lmax, spin))
+    p = wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=ninv, ell_split=ell_split)
+    a = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, precond=p, max_iter=800, tol=1e-12)
+    x = np.asarray(alm_to_real(a, lmax, spin))
+    x_ref = _dense_wiener_x(nside, lmax, spin, ninv, cl, m)
+    assert np.max(np.abs(x - x_ref)) <= SOLVE_TOL * (1.0 + np.max(np.abs(x_ref)))
+    pinned = _prior_sqrt_ref(cl, lmax, spin) == 0
+    assert np.all(x[pinned] == 0.0)
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+def test_pcg_unpreconditioned_matches_dense_and_default(spin):
+    """jht's CG (``return_info`` without a preconditioner) == dense == the stock jax-cg path."""
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=25)
+    cl = _signal_cl(lmax, spin)
+    cl_j = _cl_jax(cl, spin)
+    m = np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 26)), nside, lmax, spin))
+    a, info = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, return_info=True, max_iter=800, tol=1e-12)
+    a_def = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, max_iter=800, tol=1e-12)
+    x = np.asarray(alm_to_real(a, lmax, spin))
+    x_ref = _dense_wiener_x(nside, lmax, spin, ninv, cl, m)
+    scale = 1.0 + np.max(np.abs(x_ref))
+    assert np.max(np.abs(x - x_ref)) <= SOLVE_TOL * scale
+    assert np.max(np.abs(np.asarray(a) - np.asarray(a_def))) <= SOLVE_TOL * scale
+    assert float(info.rel_residual) <= 1e-12 and 0 < int(info.n_iter) < 800
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+def test_precond_exact_block_converges_immediately(spin):
+    """With the block covering every DOF, M is the operator itself: one CG step (two with roundoff)."""
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=27)
+    cl_j = _cl_jax(_signal_cl(lmax, spin), spin)
+    m = np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 28)), nside, lmax, spin))
+    p = wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=ninv, ell_split=lmax)
+    assert p.low_idx.shape[0] == n_dof(lmax, spin)
+    _, info = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, precond=p, return_info=True, max_iter=800, tol=1e-12)
+    assert int(info.n_iter) <= 2
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+def test_solve_info_reports_true_residual(spin):
+    """``rel_residual`` is the true ``||Pb - (PAP+I)y|| / ||Pb||``, converged or capped."""
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=29)
+    cl = _signal_cl(lmax, spin)
+    cl_j = _cl_jax(cl, spin)
+    m = np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 30)), nside, lmax, spin))
+    p = wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=ninv, ell_split=4)
+    nb = _ninv_bcast(ninv, spin)
+    pw = jnp.asarray(_prior_sqrt_ref(cl, lmax, spin))
+    rhs = pw * alm_to_real(adjoint_synthesis(nb * jnp.asarray(m), nside, lmax, spin), lmax, spin)
+
+    def true_rel(a):
+        y = alm_to_real(a, lmax, spin) / pw
+        r = rhs - _whitened_op(y, nb, pw, nside, lmax, spin)
+        return float(jnp.linalg.norm(r) / jnp.linalg.norm(rhs))
+
+    tol = 1e-10
+    a, info = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, precond=p, return_info=True, max_iter=800, tol=tol)
+    assert float(info.rel_residual) <= tol
+    assert abs(float(info.rel_residual) - true_rel(a)) <= 1e-12
+
+    a3, info3 = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, precond=p, return_info=True, max_iter=3, tol=tol)
+    assert int(info3.n_iter) == 3 and float(info3.rel_residual) > tol
+    assert abs(float(info3.rel_residual) - true_rel(a3)) <= 1e-8 * true_rel(a3)
+
+
+def test_precond_shape_mismatch_raises():
+    nside, lmax, spin = 8, 8, 2
+    ninv = _ninv(nside, _binary_cap(nside, 0.4), seed=31)
+    cl_j = _cl_jax(_signal_cl(lmax, spin), spin)
+    p = wiener_preconditioner(_cl_jax(_signal_cl(6, spin), spin), nside, 6, spin, inv_noise=ninv, ell_split=None)
+    m = np.zeros((2, 12 * nside**2))
+    with pytest.raises(ValueError, match="DOFs"):
+        wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=ninv, precond=p)
+
+
+@pytest.mark.parametrize("spin", [0, 2])
+def test_precond_constrained_realization_matches_unpreconditioned(spin):
+    """Same key -> same stochastic RHS -> the same draw with or without the preconditioner."""
+    nside, lmax = 8, 8
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=32)
+    cl_j = _cl_jax(_signal_cl(lmax, spin), spin)
+    m = jnp.asarray(np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 33)), nside, lmax, spin)))
+    key = jax.random.PRNGKey(5)
+    p = wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=ninv, ell_split=4)
+    a_p, info = constrained_realization(
+        m, cl_j, nside, lmax, key, spin=spin, inv_noise=ninv, precond=p, return_info=True, max_iter=800, tol=1e-12
+    )
+    a_0 = constrained_realization(m, cl_j, nside, lmax, key, spin=spin, inv_noise=ninv, max_iter=800, tol=1e-12)
+    a_0 = np.asarray(a_0)
+    assert np.max(np.abs(np.asarray(a_p) - a_0)) <= SOLVE_TOL * (1.0 + np.max(np.abs(a_0)))
+    assert float(info.rel_residual) <= 1e-12
+
+
+def test_precond_gradients_match_unpreconditioned():
+    """Implicit gradients (wrt Cl and the data) are those of the solution, not of the path."""
+    nside, lmax, spin = 8, 6, 0
+    mask = _binary_cap(nside, 0.4)
+    ninv = jnp.asarray(_ninv(nside, mask, seed=34))
+    m = jnp.asarray(np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 35)), nside, lmax, spin)))
+    cl0 = jnp.asarray(_signal_cl(lmax, spin))
+    p = wiener_preconditioner(cl0, nside, lmax, spin, inv_noise=ninv, ell_split=3)
+
+    def loss(cl, mm, pc):
+        a = wiener(mm, cl, nside, lmax, spin=spin, inv_noise=ninv, precond=pc, max_iter=400, tol=1e-12)
+        return jnp.real(jnp.sum(jnp.abs(a) ** 2))
+
+    loss(cl0, m, None)  # pre-warm caches before grad
+    g_p = np.asarray(jax.grad(loss)(cl0, m, p))
+    g_0 = np.asarray(jax.grad(loss)(cl0, m, None))
+    assert np.all(np.isfinite(g_p))
+    assert np.max(np.abs(g_p - g_0)) <= 1e-6 * np.max(np.abs(g_0))
+    g_pj = np.asarray(jax.jit(jax.grad(loss))(cl0, m, p))
+    assert np.max(np.abs(g_pj - g_p)) <= 1e-9 * (1.0 + np.max(np.abs(g_p)))
+    gm_p = np.asarray(jax.grad(loss, argnums=1)(cl0, m, p))
+    gm_0 = np.asarray(jax.grad(loss, argnums=1)(cl0, m, None))
+    assert np.max(np.abs(gm_p - gm_0)) <= 1e-6 * np.max(np.abs(gm_0))
+
+
+def test_precond_vmap_matches_per_sample():
+    nside, lmax, spin = 8, 8, 2
+    mask = _binary_cap(nside, 0.4)
+    ninv = _ninv(nside, mask, seed=36)
+    cl_j = _cl_jax(_signal_cl(lmax, spin), spin)
+    maps = jnp.stack([jnp.asarray(np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, s)), nside, lmax, spin))) for s in (37, 38, 39)])
+    p = wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=ninv, ell_split=4)
+
+    def one(mm):
+        return wiener(mm, cl_j, nside, lmax, spin=spin, inv_noise=ninv, precond=p, return_info=True, max_iter=800, tol=1e-12)
+
+    one(maps[0])  # pre-warm the static-layout caches before vmap
+    a_v, info_v = jax.vmap(one)(maps)
+    assert info_v.n_iter.shape == (3,) and np.all(np.asarray(info_v.rel_residual) <= 1e-12)
+    for i in range(3):
+        a_i = np.asarray(one(maps[i])[0])
+        assert np.max(np.abs(np.asarray(a_v[i]) - a_i)) <= SOLVE_TOL * (1.0 + np.max(np.abs(a_i)))
+
+
+def test_precond_cuts_iterations_on_irregular_mask():
+    """Two-sided band cut + holes, red prior, S/N >> 1 at low l (spin 2, nside 32, lmax 48).
+
+    Measured in this configuration: 454 iterations to 1e-8 unpreconditioned, 241 with the
+    diagonal alone, 123 with the l <= 16 block.  Gated with margin: diagonal < none, and
+    the block at most half of none.
+    """
+    import healpy as hp
+
+    nside, lmax, spin = 32, 48, 2
+    npix = 12 * nside**2
+    th = _theta(nside)
+    mask = (np.abs(th - np.pi / 2) > np.radians(20)).astype(float)
+    rng = np.random.default_rng(3)
+    for c in rng.integers(0, npix, 12):
+        mask[hp.query_disc(nside, hp.pix2vec(nside, int(c)), np.radians(rng.uniform(3, 8)))] = 0.0
+    ell = np.arange(lmax + 1)
+    cl_ee = np.where(ell >= 2, 1e2 / (ell + 1.0) ** 2, 0.0)
+    cl_j = (jnp.asarray(cl_ee), jnp.asarray(0.05 * cl_ee))
+    alm = np.stack([hp.synalm(cl_ee, lmax=lmax, new=True), hp.synalm(0.05 * cl_ee, lmax=lmax, new=True)])
+    m = np.asarray(synthesis(jnp.asarray(alm), nside, lmax, spin)) + np.random.default_rng(4).standard_normal((2, npix))
+
+    def iters(pc):
+        _, info = wiener(m, cl_j, nside, lmax, spin=spin, inv_noise=mask, precond=pc, return_info=True, max_iter=2000, tol=1e-8)
+        assert float(info.rel_residual) <= 1e-8
+        return int(info.n_iter)
+
+    n_none = iters(None)
+    n_diag = iters(wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=mask, ell_split=None))
+    n_block = iters(wiener_preconditioner(cl_j, nside, lmax, spin, inv_noise=mask, ell_split=16))
+    assert n_diag < n_none
+    assert n_block <= 0.5 * n_none, (n_none, n_diag, n_block)
+
+
+def test_deconvolve_reports_solve_info():
+    nside, lmax, spin = 8, 8, 2
+    mask = _binary_cap(nside, 0.3)
+    m = np.asarray(synthesis(jnp.asarray(_rand_alm(lmax, spin, 40)), nside, lmax, spin))
+    a, info = deconvolve(m, mask, nside, lmax, spin=spin, reg=0.1, max_iter=800, tol=1e-12, return_info=True)
+    a_def = np.asarray(deconvolve(m, mask, nside, lmax, spin=spin, reg=0.1, max_iter=800, tol=1e-12))
+    assert float(info.rel_residual) <= 1e-12
+    assert np.max(np.abs(np.asarray(a) - a_def)) <= SOLVE_TOL * (1.0 + np.max(np.abs(a_def)))

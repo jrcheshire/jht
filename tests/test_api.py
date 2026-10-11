@@ -23,6 +23,7 @@ EXPECTED = {
     "synthesis_general", "adjoint_synthesis_general",
     "ring_weights", "pixel_weights", "pseudo_alm", "deconvolve",
     "wiener", "constrained_realization",
+    "wiener_preconditioner", "WienerPreconditioner", "SolveInfo",
     "synthesis_real", "analysis_real",
     "synthesis_general_real", "adjoint_synthesis_general_real",
     "bandpower", "synthesis_vjp", "adjoint_synthesis_vjp",
@@ -62,6 +63,9 @@ def test_reexports_are_the_real_objects():
     assert jht.deconvolve is masked.deconvolve
     assert jht.wiener is masked.wiener
     assert jht.constrained_realization is masked.constrained_realization
+    assert jht.wiener_preconditioner is masked.wiener_preconditioner
+    assert jht.WienerPreconditioner is masked.WienerPreconditioner
+    assert jht.SolveInfo is masked.SolveInfo
     assert jht.synthesis_real is diff.synthesis_real
     assert jht.analysis_real is diff.analysis_real
     assert jht.synthesis_general_real is diff.synthesis_general_real
