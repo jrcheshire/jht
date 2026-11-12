@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-12
+
 ### Fixed
 - **`synthesis_general` / `adjoint_synthesis_general` under `jax.jit` at points exactly
   on a node of the NUFFT's oversampled grid** (a colatitude or longitude that is an
@@ -240,7 +242,8 @@ the name `jht` is unavailable on PyPI). GitHub repo and import package stay `jht
   ring assembly) make the adjoint and off-grid forward fast and let nside=2048 compile.
   Parity + diagnostic harnesses `scripts/gpu_check.py`, `scripts/gpu_diagnostic.py`.
 
-[Unreleased]: https://github.com/jrcheshire/jht/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jrcheshire/jht/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jrcheshire/jht/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jrcheshire/jht/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jrcheshire/jht/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jrcheshire/jht/compare/v0.1.4...v0.2.0
