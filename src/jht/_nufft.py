@@ -137,13 +137,25 @@ def nufft_plan(Nk: int, Nm: int, eps: float) -> NufftPlan:
 
 
 def _stencil(coord, n: int, W: int, beta: float):
-    """``(idx (Npts,W) mod n, weights (Npts,W))`` for the W-wide ES stencil.
+    """``(idx (Npts,W) mod n, weights (Npts,W))`` for the W-wide ES stencil (``W`` even).
 
     The window base is ``stop_gradient``-frozen (locally constant); the weights
     are smooth in ``coord`` -> native AD gives the analytic point-derivative.
+
+    The base is ``ceil(xi) - W/2`` with the grid coordinate ``xi`` a single product,
+    not ``ceil(xi - W/2)`` of a product-and-divide.  Both are the same integer in
+    exact arithmetic, but the indices and the weights must use the *same* base, and
+    a compiler is free to evaluate a shared floating-point expression more than
+    once, fusing or reordering its operations differently each time.  For a point
+    exactly on a grid node (``xi`` an integer) two such evaluations of
+    ``coord * n / 2pi - W/2`` fall either side of the integer: under ``jax.jit``
+    the indices moved by one cell while the weights did not.  The ceiling of one
+    correctly-rounded multiply has no second way to be evaluated.
     """
-    xi = coord * n / TWO_PI
-    base = jax.lax.stop_gradient(jnp.ceil(xi - W / 2.0)).astype(jnp.int64)
+    if W % 2:
+        raise ValueError(f"stencil width must be even; got {W}")
+    xi = coord * (n / TWO_PI)
+    base = jax.lax.stop_gradient(jnp.ceil(xi)).astype(jnp.int64) - W // 2
     off = jnp.arange(W)
     ell = base[:, None] + off[None, :]  # (Npts, W) true grid coords (un-wrapped)
     w = _es_kernel(xi[:, None] - ell, beta, W)

@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`synthesis_general` / `adjoint_synthesis_general` under `jax.jit` at points exactly
+  on a node of the NUFFT's oversampled grid** (a colatitude or longitude that is an
+  exact multiple of `2 pi / n`, e.g. some HEALPix pixel centres) returned values wrong
+  by of order the field itself. The stencil's first cell was `ceil(x n / 2 pi - W/2)`;
+  a compiled program evaluated that expression twice with different rounding, once for
+  the cell indices and once for the weights, and on a node the two differed by one
+  cell. The base is now `ceil` of a single product, which has only one evaluation.
+  Uncompiled calls were never affected; neither were points off the nodes. Gated by
+  `tests/test_nufft_stencil.py` (compiled vs uncompiled stencil on every node; compiled
+  transform vs the exact direct sum on node points).
+
 ## [0.4.0] - 2026-10-10
 
 ### Added
