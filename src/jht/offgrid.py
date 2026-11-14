@@ -29,7 +29,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._nufft import NufftPlan, _next_size, nufft2d1, nufft2d2, nufft_plan
+from . import _nufft
+from ._nufft import NufftPlan, PreparedPoints, _next_size, nufft2d1, nufft2d2, nufft_plan
 from ._recursion import RecursionPlan, adjoint_contract, build_recursion_plan, synth_contract
 from .healpix import _tri_dense_maps, alm_metric_weight, alm_size
 
@@ -165,6 +166,17 @@ def _Fkm_to_alm(p: _OffgridPrep, G):
     return _channels_adjoint(p, p_cot, n_cot)
 
 
+def _check_alm(alm, lmax: int, spin: int):
+    alm = jnp.asarray(alm)
+    expect = (alm_size(lmax),) if spin == 0 else (2, alm_size(lmax))
+    if alm.shape != expect:
+        raise ValueError(
+            f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
+            "(a wrong-size alm would otherwise be silently clamped by the gather)"
+        )
+    return alm
+
+
 # --------------------------------------------------------------------------- #
 # public transforms
 # --------------------------------------------------------------------------- #
@@ -197,13 +209,7 @@ def synthesis_general(alm, loc, *, spin: int = 0, lmax: int, epsilon: float = 1e
     loc = jnp.asarray(loc)
     if loc.ndim != 2 or loc.shape[-1] != 2:
         raise ValueError(f"loc must have shape (npts, 2) [theta, phi]; got {loc.shape}")
-    alm = jnp.asarray(alm)
-    expect = (alm_size(lmax),) if spin == 0 else (2, alm_size(lmax))
-    if alm.shape != expect:
-        raise ValueError(
-            f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
-            "(a wrong-size alm would otherwise be silently clamped by the gather)"
-        )
+    alm = _check_alm(alm, lmax, spin)
     theta, phi = loc[:, 0], loc[:, 1]
     field = nufft2d2(p.nplan, _alm_to_Fkm(p, alm), theta, phi)
     if p.spin == 0:
@@ -234,9 +240,178 @@ def adjoint_synthesis_general(field, loc, *, spin: int = 0, lmax: int, epsilon: 
     if field.shape != expect:
         raise ValueError(f"field shape {field.shape} != expected {expect} for {npts} points")
     theta, phi = loc[:, 0], loc[:, 1]
-    # transpose of the (Re) / (Re, Im) field reduction
-    fc = field.astype(jnp.complex128) if p.spin == 0 else (field[0] + 1j * field[1])
+    # transpose of the (Re) / (Re, Im) field reduction; spin-0 spreads a real grid
+    fc = field if p.spin == 0 else (field[0] + 1j * field[1])
     fkm_cot = nufft2d1(p.nplan, fc, theta, phi)
     # _Fkm_to_alm is the raw C^K Hermitian transpose (== conj(vjp)); the strict
     # adjoint in jht's (2 - delta_m0) metric divides by G (m<0 modes are implicit).
     return _Fkm_to_alm(p, fkm_cot) / jnp.asarray(p.gmetric)
+
+
+# --------------------------------------------------------------------------- #
+# two-stage interface: sky <-> NUFFT grid <-> points
+# --------------------------------------------------------------------------- #
+DEFAULT_GROUP_SIZE = 16
+
+
+def offgrid_grid_shape(lmax: int, epsilon: float = 1e-10) -> tuple[int, int]:
+    """Shape ``(nk, nm)`` of the oversampled NUFFT grid used at ``(lmax, epsilon)``."""
+    plan = _prepare(lmax, 0, epsilon).nplan
+    return plan.nk, plan.nm
+
+
+def prepare_points(
+    loc, *, lmax: int, epsilon: float = 1e-10, store_weights: bool = False,
+    group_size: int | None = None,
+) -> PreparedPoints:
+    """Prepare a point set for :func:`grid_to_points` / :func:`points_to_grid`.
+
+    Host-side (NumPy), once per point set; call it outside ``jax.jit``.  Fixes each
+    point's NUFFT stencil cell and groups the points by cell, so the transposed step
+    writes one ``(W, W)`` block per group instead of one per point.  Valid for any
+    pointings, and for every spin at this ``(lmax, epsilon)``.
+
+    Parameters
+    ----------
+    loc : ``(npts, 2)`` real, ``[theta, phi]`` as in :func:`synthesis_general`.
+    lmax, epsilon : the transform the points will be used with.
+    store_weights : keep the kernel weights (``2 W`` float64 per point, 224 B at the
+        default epsilon) so calls need no ``loc``.  Calls without ``loc`` carry no
+        gradient with respect to the pointing.
+    group_size : the largest group (default 16).  Cells with fewer points use groups
+        of the next power of two, so sparse and dense sets both pad less than 2x.
+
+    The returned :class:`PreparedPoints` is a pytree; pass it into compiled functions
+    as an argument.
+    """
+    if isinstance(loc, jax.core.Tracer):
+        raise TypeError("prepare_points runs on the host: call it outside jax.jit / grad")
+    loc = np.asarray(loc, dtype=np.float64)
+    if loc.ndim != 2 or loc.shape[-1] != 2:
+        raise ValueError(f"loc must have shape (npts, 2) [theta, phi]; got {loc.shape}")
+    p = _prepare(lmax, 0, epsilon)
+    return _nufft.prepare_points_plan(
+        (p.ntheta_d, 2 * lmax + 1, epsilon), loc[:, 0], loc[:, 1],
+        group_size=DEFAULT_GROUP_SIZE if group_size is None else int(group_size),
+        store_weights=store_weights,
+    )
+
+
+def _check_points(points) -> NufftPlan:
+    if not isinstance(points, PreparedPoints):
+        raise TypeError(f"points must come from prepare_points; got {type(points).__name__}")
+    return points.plan
+
+
+def _point_weights(points: PreparedPoints, plan: NufftPlan, loc):
+    """Kernel weights ``(wk, wm)`` and a scalar ``ok`` (False if a point left its cell).
+
+    With ``loc`` the weights are recomputed at the prepared bases (differentiable in
+    ``loc``); without, the stored weights are used.  A concrete stale ``loc`` raises.
+    """
+    if loc is None:
+        if not points.stores_weights:
+            raise ValueError(
+                "loc is required: these points were prepared without store_weights=True"
+            )
+        return points.wk, points.wm, None
+    loc = jnp.asarray(loc)
+    if loc.shape != (points.npts, 2):
+        raise ValueError(f"loc must have shape ({points.npts}, 2) [theta, phi]; got {loc.shape}")
+    x, y = loc[:, 0], loc[:, 1]
+    bk, bm = points.base[:, 0], points.base[:, 1]
+    inside = (_nufft._in_prepared_cell(x, bk, plan.nk, plan.W)
+              & _nufft._in_prepared_cell(y, bm, plan.nm, plan.W))
+    ok = jnp.all(inside)
+    try:
+        concrete = bool(ok)
+    except jax.errors.ConcretizationTypeError:  # traced: poison the output instead
+        concrete = None
+    if concrete is False:
+        raise ValueError(
+            f"{int(np.sum(~np.asarray(inside)))} of {points.npts} points are outside the "
+            "grid cells they were prepared in: call prepare_points with the new loc"
+        )
+    wk = _nufft._weights_from_base(x, bk, plan.nk, plan.W, plan.beta_k)
+    wm = _nufft._weights_from_base(y, bm, plan.nm, plan.W, plan.beta_m)
+    return wk, wm, (None if concrete else ok)
+
+
+def _poison(out, ok):
+    return out if ok is None else jnp.where(ok, out, jnp.nan)
+
+
+def _check_grid(grid, plan: NufftPlan, spin: int):
+    grid = jnp.asarray(grid)
+    if grid.shape != (plan.nk, plan.nm):
+        raise ValueError(f"grid must have shape ({plan.nk}, {plan.nm}); got {grid.shape}")
+    if spin == 0 and jnp.iscomplexobj(grid):
+        raise TypeError("the spin-0 grid is real; got a complex array")
+    return grid
+
+
+def sky_to_grid(alm, *, spin: int = 0, lmax: int, epsilon: float = 1e-10):
+    """``a_lm`` -> the oversampled NUFFT grid (the point-independent half of
+    :func:`synthesis_general`).
+
+    Legendre step, double-Fourier-sphere extension, kernel deconvolution and inverse FFT.
+    Returns ``offgrid_grid_shape(lmax, epsilon)``, real float64 for ``spin=0`` and
+    complex128 for ``spin>0``; :func:`grid_to_points` evaluates it at a point set.  The
+    grid is the NUFFT's internal torus grid, not a HEALPix map.
+    """
+    p = _prepare(lmax, spin, epsilon)
+    alm = _check_alm(alm, lmax, spin)
+    g = _nufft._modes_to_grid(p.nplan, _alm_to_Fkm(p, alm))
+    return jnp.real(g) if spin == 0 else g
+
+
+def grid_to_sky(grid, *, spin: int = 0, lmax: int, epsilon: float = 1e-10):
+    """Exact transpose of :func:`sky_to_grid`: grid -> ``a_lm``.
+
+    Transpose in the ``(2 - delta_m0)`` metric on ``a_lm`` and the plain inner product
+    ``Re sum conj(g1) g2`` on the grid, so
+    ``adjoint_synthesis_general(v, loc) == grid_to_sky(points_to_grid(v, points, loc))``.
+    Grids from several point sets may be summed first.
+    """
+    p = _prepare(lmax, spin, epsilon)
+    grid = _check_grid(grid, p.nplan, spin)
+    return _Fkm_to_alm(p, _nufft._grid_to_modes(p.nplan, grid)) / jnp.asarray(p.gmetric)
+
+
+def grid_to_points(grid, points: PreparedPoints, loc=None, *, spin: int = 0):
+    """Evaluate a :func:`sky_to_grid` grid at a prepared point set.
+
+    The points must be prepared with the grid's ``lmax`` and ``epsilon``: the grid shape
+    is checked, but it depends on ``lmax`` only, so an ``epsilon`` mismatch is not
+    detected.  ``loc`` must be the positions the points were prepared from (or points still in
+    the same NUFFT grid cells); the result is differentiable in it.  ``loc=None`` uses
+    stored weights (``prepare_points(..., store_weights=True)``).  A point outside its
+    prepared cell raises when ``loc`` is concrete and turns the whole output into NaN
+    under a trace.  Returns ``(npts,)`` for ``spin=0`` or ``(2, npts)`` otherwise, as
+    :func:`synthesis_general`.
+    """
+    plan = _check_points(points)
+    grid = _check_grid(grid, plan, spin)
+    wk, wm, ok = _point_weights(points, plan, loc)
+    f = _nufft._interp_prepared(plan, grid, wk, wm, points.base)
+    out = f if spin == 0 else jnp.stack([jnp.real(f), jnp.imag(f)])
+    return _poison(out, ok)
+
+
+def points_to_grid(field, points: PreparedPoints, loc=None, *, spin: int = 0):
+    """Exact transpose of :func:`grid_to_points`: spread point values onto the grid.
+
+    ``field`` is ``(npts,)`` real for ``spin=0`` or ``(2, npts)`` otherwise.  Returns
+    the grid (real for ``spin=0``); grids from several point sets add before one
+    :func:`grid_to_sky`.  ``loc`` as in :func:`grid_to_points`.
+    """
+    plan = _check_points(points)
+    field = jnp.asarray(field)
+    if jnp.iscomplexobj(field):
+        raise TypeError("field must be real ((npts,) for spin=0; (2, npts) for spin>0)")
+    expect = (points.npts,) if spin == 0 else (2, points.npts)
+    if field.shape != expect:
+        raise ValueError(f"field shape {field.shape} != expected {expect}")
+    wk, wm, ok = _point_weights(points, plan, loc)
+    v = field if spin == 0 else field[0] + 1j * field[1]
+    return _poison(_nufft._spread_grouped(plan, v, wk, wm, points.buckets), ok)

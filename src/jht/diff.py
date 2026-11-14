@@ -38,13 +38,15 @@ import numpy as np
 from ._analysis import analysis
 from .healpix import adjoint_synthesis, alm_metric_weight, alm_size, synthesis
 from .masked import alm_to_real, n_dof, real_to_alm
-from .offgrid import adjoint_synthesis_general, synthesis_general
+from .offgrid import adjoint_synthesis_general, grid_to_sky, sky_to_grid, synthesis_general
 
 __all__ = [
     "synthesis_real",
     "analysis_real",
     "synthesis_general_real",
     "adjoint_synthesis_general_real",
+    "sky_to_grid_real",
+    "grid_to_sky_real",
     "bandpower",
     "synthesis_vjp",
     "adjoint_synthesis_vjp",
@@ -110,6 +112,29 @@ def adjoint_synthesis_general_real(
     """
     a = adjoint_synthesis_general(field, loc, spin=spin, lmax=lmax, epsilon=epsilon)
     return alm_to_real(a, lmax, spin)
+
+
+def sky_to_grid_real(x, *, spin: int = 0, lmax: int, epsilon: float = 1e-10) -> jax.Array:
+    """``sky_to_grid o T^-1``: real-DOF vector ``x`` -> the off-grid NUFFT grid.
+
+    The real-DOF first stage of the two-stage off-grid transform
+    (:func:`jht.offgrid.sky_to_grid`); compose with :func:`jht.offgrid.grid_to_points`
+    for :func:`synthesis_general_real`.  The grid is real for ``spin=0`` and complex
+    otherwise.
+    """
+    return sky_to_grid(real_to_alm(x, lmax, spin), spin=spin, lmax=lmax, epsilon=epsilon)
+
+
+def grid_to_sky_real(grid, *, spin: int = 0, lmax: int, epsilon: float = 1e-10) -> jax.Array:
+    """``T o grid_to_sky``: NUFFT grid -> real-DOF vector, the exact transpose of
+    :func:`sky_to_grid_real`.
+
+    Transpose in the plain inner products, ``Re sum conj(g1) g2`` on the grid:
+    ``Re<sky_to_grid_real(x), g> == <x, grid_to_sky_real(g)>``.  For ``spin=0`` (a real
+    grid) this is also the reverse-mode cotangent of :func:`sky_to_grid_real`; for a
+    complex grid JAX's cotangent is ``grid_to_sky_real(conj(g))``.
+    """
+    return alm_to_real(grid_to_sky(grid, spin=spin, lmax=lmax, epsilon=epsilon), lmax, spin)
 
 
 # --------------------------------------------------------------------------- #

@@ -39,6 +39,8 @@ from .diff import (
     adjoint_synthesis_vjp,
     analysis_real,
     bandpower,
+    grid_to_sky_real,
+    sky_to_grid_real,
     synthesis_general_real,
     synthesis_real,
     synthesis_vjp,
@@ -61,7 +63,17 @@ from .masked import (
     wiener,
     wiener_preconditioner,
 )
-from .offgrid import adjoint_synthesis_general, synthesis_general
+from .offgrid import (
+    PreparedPoints,
+    adjoint_synthesis_general,
+    grid_to_points,
+    grid_to_sky,
+    offgrid_grid_shape,
+    points_to_grid,
+    prepare_points,
+    sky_to_grid,
+    synthesis_general,
+)
 from .weights import pixel_weights, ring_weights
 
 __version__ = "0.4.1"  # single source of truth; pyproject reads this via hatch
@@ -76,6 +88,14 @@ __all__ = [
     # off-grid (arbitrary points / NUFFT) -- spin 0-3, alm- AND pointing-differentiable
     "synthesis_general",  # a_lm -> field at arbitrary (theta, phi)
     "adjoint_synthesis_general",  # its exact transpose
+    # off-grid in two stages, split at the NUFFT's oversampled grid (point sets prepared once)
+    "prepare_points",  # host-side: fix stencil cells, group points by cell
+    "PreparedPoints",
+    "sky_to_grid",  # a_lm -> NUFFT grid (the point-independent half)
+    "grid_to_points",  # NUFFT grid -> field at a prepared point set
+    "points_to_grid",  # its exact transpose (spread); grids from point blocks add
+    "grid_to_sky",  # exact transpose of sky_to_grid
+    "offgrid_grid_shape",
     # analysis (approximate inverse): map -> a_lm
     "analysis",  # A0 + Jacobi iteration (canonical)
     "map2alm",  # healpy-idiom alias of `analysis`
@@ -96,6 +116,8 @@ __all__ = [
     "analysis_real",  # T o analysis : map -> R^n
     "synthesis_general_real",  # S_g o T^-1 : R^n -> field at arbitrary points
     "adjoint_synthesis_general_real",  # T o S_g^T : field -> R^n (exact transpose)
+    "sky_to_grid_real",  # sky_to_grid o T^-1 : R^n -> NUFFT grid
+    "grid_to_sky_real",  # T o grid_to_sky : its exact transpose
     "bandpower",  # angular auto-power C_ell
     # reverse-only transforms: native AD's gradients without the recursion tape (no jvp)
     "synthesis_vjp",

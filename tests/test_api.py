@@ -21,11 +21,14 @@ from jht import _analysis, _azimuth, _cache, diff, healpix, masked, offgrid, wei
 EXPECTED = {
     "synthesis", "adjoint_synthesis", "analysis", "map2alm", "bare_analysis",
     "synthesis_general", "adjoint_synthesis_general",
+    "prepare_points", "PreparedPoints", "sky_to_grid", "grid_to_points", "points_to_grid",
+    "grid_to_sky", "offgrid_grid_shape",
     "ring_weights", "pixel_weights", "pseudo_alm", "deconvolve",
     "wiener", "constrained_realization",
     "wiener_preconditioner", "WienerPreconditioner", "SolveInfo",
     "synthesis_real", "analysis_real",
     "synthesis_general_real", "adjoint_synthesis_general_real",
+    "sky_to_grid_real", "grid_to_sky_real",
     "bandpower", "synthesis_vjp", "adjoint_synthesis_vjp",
     "alm_to_real", "real_to_alm", "n_dof", "alm_size", "alm_metric_weight",
     "enable_compilation_cache",
@@ -51,6 +54,9 @@ def test_reexports_are_the_real_objects():
     assert jht.adjoint_synthesis is healpix.adjoint_synthesis
     assert jht.synthesis_general is offgrid.synthesis_general
     assert jht.adjoint_synthesis_general is offgrid.adjoint_synthesis_general
+    for name in ("prepare_points", "PreparedPoints", "sky_to_grid", "grid_to_points",
+                 "points_to_grid", "grid_to_sky", "offgrid_grid_shape"):
+        assert getattr(jht, name) is getattr(offgrid, name)
     assert jht.alm_size is healpix.alm_size
     assert jht.alm_metric_weight is healpix.alm_metric_weight
     assert jht.analysis is _analysis.analysis
@@ -70,6 +76,8 @@ def test_reexports_are_the_real_objects():
     assert jht.analysis_real is diff.analysis_real
     assert jht.synthesis_general_real is diff.synthesis_general_real
     assert jht.adjoint_synthesis_general_real is diff.adjoint_synthesis_general_real
+    assert jht.sky_to_grid_real is diff.sky_to_grid_real
+    assert jht.grid_to_sky_real is diff.grid_to_sky_real
     assert jht.bandpower is diff.bandpower
     assert jht.synthesis_vjp is diff.synthesis_vjp
     assert jht.adjoint_synthesis_vjp is diff.adjoint_synthesis_vjp
