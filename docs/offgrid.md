@@ -28,6 +28,44 @@ Matches ducc's convention (verified bit-for-bit on the physical modes), so it is
 drop-in: same alm packing, same `loc` layout, **no `psi`** argument (the spin
 orientation rotation stays on the caller's side, as in ducc).
 
+## Two stages and prepared point sets
+
+The transform splits at the NUFFT's σ-oversampled grid (`jht.offgrid_grid_shape(lmax,
+epsilon)`; the NUFFT's internal torus grid, not a HEALPix map):
+
+```python
+pts  = jht.prepare_points(loc, lmax=lmax, epsilon=1e-10)  # host side, once per point set
+grid = jht.sky_to_grid(alm, spin=spin, lmax=lmax)         # a_lm -> grid (point-independent)
+f    = jht.grid_to_points(grid, pts, loc, spin=spin)      # == synthesis_general(alm, loc, ...)
+g    = jht.points_to_grid(f, pts, loc, spin=spin)         # exact transpose of grid_to_points
+alm  = jht.grid_to_sky(g, spin=spin, lmax=lmax)           # == adjoint_synthesis_general(f, loc, ...)
+```
+
+- **One sky, many point sets.** `sky_to_grid` / `grid_to_sky` hold the Legendre step,
+  the double-Fourier-sphere extension and the FFTs (~85–90 ms each at lmax 256), which
+  do not depend on the points. Grids from several point blocks add, so a transposed pass
+  over many blocks is `grid_to_sky(sum of points_to_grid(...))`, one Legendre step.
+- **Grid type.** Real float64 for spin 0 (the spin-0 field is the real part and the
+  kernel weights are real), complex128 for spin > 0. The stage pairs are exact
+  transposes in the `(2 − δ_{m0})` metric on aₗₘ and `Re Σ conj(g₁) g₂` on the grid.
+- **Prepared points.** `prepare_points` fixes each point's stencil cell and groups the
+  points by cell, so `points_to_grid` sums each group's `(W, W)` block and writes it once
+  (6–7× the per-point spread on dense sets, ~2× on sparse ones; `performance.md`).
+  Groups hold up to `group_size` points (default 16); a cell with fewer uses the next
+  power of two, so padding stays under 2× at any density. Nothing is assumed about the
+  pointing. Prepare the points with the grid's `lmax` and `epsilon`: the grid shape is
+  checked, an `epsilon` mismatch is not.
+- **`loc` and the pointing gradient.** With `loc` passed, the kernel weights are
+  recomputed at the prepared cells, and the result is differentiable in `loc` exactly as
+  `synthesis_general` is. Every point must still lie in its prepared cell (motion within
+  the cell is exact). If not, a call with concrete `loc` raises `ValueError`, and a
+  traced call returns NaN throughout. Re-prepare when the pointing moves further.
+- **Stored weights.** `prepare_points(..., store_weights=True)` keeps the kernel weights
+  (`2W` float64 per point, 224 B at ε = 1e-10) and the calls take `loc=None`: about 1.6×
+  faster forward and 1.1× transposed, no pointing gradient.
+- **Real-DOF.** `jht.sky_to_grid_real` / `jht.grid_to_sky_real` compose the stages with
+  the real isometry `T`, as `synthesis_general_real` does.
+
 ## Algorithm — Double-Fourier-Sphere + 2D type-2 NUFFT
 
 This is ducc's `sphere_interpol` method (Reinecke, Belkner & Carron 2023,
@@ -45,7 +83,9 @@ arXiv:2304.10431), clean-roomed in pure JAX. Per helicity component:
    the kernel FT), zero-pad to the σ-oversampled grid, IFFT2, then **ES-kernel**
    (`exp(β(√(1−(2t/W)²)−1))`, Barnett+ 2019) separable interpolation onto the
    points. Implemented in `jht._nufft` (type-2 `nufft2d2` + its exact transpose
-   type-1 `nufft2d1`).
+   type-1 `nufft2d1`). The transposed (spreading) step writes one `(W, W)` window per
+   point, or per group of prepared points, onto the grid padded by `W − 1`, then folds
+   the padding back onto the periodic grid.
 
 The adjoint reverses each step (type-1 NUFFT → transposed DFS/FFT → `adjoint_contract`).
 Code: `jht._nufft` (the 2D NUFFT) and `jht.offgrid` (the DFS + spin channels); the
@@ -71,14 +111,16 @@ on-grid weighted ~1e-13. Do not conflate the tiers.
 
 ### Memory at scale
 
-The dominant intermediate is **not** the oversampled DFS grid (`nk·nm` complex,
-~0.26 GB at lmax=1000, σ=2) but the NUFFT ES-stencil `(Npts, W, W)` complex array
-(`jht._nufft`, the type-2 gather and its type-1 transpose), ≈ `Npts·W²·16 B` —
-~3.1 GB at N=1e6, W=14 (ε=1e-10). It is linear in the number of points and
-**quadratic in the kernel half-width `W`**, so a looser ε (smaller W) is the memory
-lever at large N: ε=1e-8 (W=10) cuts it to ~1.6 GB. Budget
-`grid + Npts·W²·16 B` for the off-grid footprint; `scripts/gpu_diagnostic.py`
-reports measured-vs-predicted at production scale.
+The dominant intermediates scale with the number of points, not with the oversampled
+DFS grid (`nk·nm` complex, ~0.26 GB at lmax=1000, σ=2):
+
+- the forward stencil gather (`synthesis_general`, `grid_to_points`) and the per-point
+  spread of `adjoint_synthesis_general` hold `(Npts, W, W)` arrays, ≈ `Npts·W²·16 B`
+  (complex; half for the real spin-0 spread): ~3.1 GB at N=1e6, W=14 (ε=1e-10).
+  Quadratic in `W`, so a looser ε is the memory lever: ε=1e-8 (W=10) halves it.
+- the grouped spread of `points_to_grid` holds one `(W, W)` block per group, so its
+  footprint falls with the points per cell: 1.4 GB peak process RSS for 1M points
+  in a dense patch (lmax 256, ε=1e-10, spin 2).
 
 ## Differentiability — alm **and** pointing
 
@@ -110,7 +152,7 @@ Both gradients are exact under JAX's **native autodiff** (no custom rule):
   identity holds to ~1e-16), ducc zeros it. Harmless for physical (real-`a_{l,0}`)
   skies; the ducc cross-check compares the physical m≥1 modes.
 
-## Validation (`tests/test_offgrid.py`, spin 0–3)
+## Validation (`tests/test_offgrid.py`, `tests/test_offgrid_prepared.py`, `tests/test_nufft_spread.py`; spin 0–3)
 
 | gate | oracle | result |
 |---|---|---|
@@ -119,6 +161,11 @@ Both gradients are exact under JAX's **native autodiff** (no custom rule):
 | adjoint identity | `⟨Sa,v⟩=⟨a,Sᵀv⟩_G` | ~1e-16 |
 | alm-VJP bridge | `G·conj(adjoint)` | ~1e-14 |
 | loc/pointing grad | analytic field derivative | ~1e-12 |
+| window / grouped spread | per-cell scatter-add | ~1e-15 |
+| stage compositions | `synthesis_general` / `adjoint_synthesis_general` | ~1e-15 |
+| stage adjoint identities | `Re⟨Pg,v⟩=Re⟨g,Pᵀv⟩`, `Re⟨Sa,g⟩=⟨a,Sᵀg⟩_G` | ~3e-14 |
+| stages, forward | ducc0 `synthesis_general` | ~3e-11 |
+| prepared-path pointing grad | through `synthesis_general` / its adjoint | ~5e-16 |
 
 ## References
 

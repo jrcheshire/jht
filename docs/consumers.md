@@ -31,6 +31,7 @@ ducc0* for its GPU / differentiable tier, but nothing below is consumer-specific
 | `map → aₗₘ`, approximate **inverse** | `jht.analysis(m, …, niter=3)` | ring weights + Jacobi iteration (the healpy-`map2alm` analogue; `jht.map2alm` is a back-compat alias) |
 | **off-grid** `aₗₘ → field` at arbitrary points | `jht.synthesis_general(alm, loc, *, spin, lmax, epsilon=1e-10)` | the **ducc0 `synthesis_general` replacement**; spin ∈ {0,1,2,3}; `loc (npts,2) = (θ,φ)`; alm- **and** pointing-differentiable |
 | off-grid exact transpose | `jht.adjoint_synthesis_general(field, loc, *, spin, lmax, epsilon)` | the `adjoint_synthesis_general` replacement |
+| off-grid in two stages, prepared point sets | `jht.prepare_points`, `jht.sky_to_grid`, `jht.grid_to_points`, `jht.points_to_grid`, `jht.grid_to_sky` | one sky, many point blocks: sum `points_to_grid` over blocks, one `grid_to_sky`; grouped spread 2–7× the per-point one (see [`offgrid.md`](offgrid.md)) |
 | masked analysis | `jht.pseudo_alm`, `jht.deconvolve` | zero-fill pseudo-aₗₘ; cut-sky CG deconvolution |
 | Wiener / field-level-inference inner solve | `jht.wiener`, `jht.constrained_realization` | `(SᵀN⁻¹S + C⁻¹)⁻¹SᵀN⁻¹m` (per-pixel `N⁻¹` + Cℓ prior); posterior draws |
 | Wiener preconditioning + convergence check | `jht.wiener_preconditioner`, `return_info=True` → `jht.SolveInfo` | build once per `(N⁻¹, Cℓ)`, pass as `precond=`; `SolveInfo.rel_residual > tol` flags an unconverged solve (see [`masked.md`](masked.md)) |

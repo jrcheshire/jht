@@ -22,7 +22,7 @@ nothing in `src/` should assume a particular downstream pipeline.
 | `_azimuth.py` | per-ring azimuthal FFTs (unrolled, or the looped/chirp-z mode for O(1) compiled kernels) |
 | `_analysis.py`, `weights.py` | `analysis` / `map2alm` (ring quadrature weights + Jacobi iteration), `bare_analysis` |
 | `diff.py` | real-DOF transforms (`synthesis_real`, `analysis_real`, …), `bandpower`, reverse-only `*_vjp` |
-| `offgrid.py`, `_nufft.py` | `synthesis_general` / `adjoint_synthesis_general` at arbitrary pointings (spin 0–3) |
+| `offgrid.py`, `_nufft.py` | `synthesis_general` / `adjoint_synthesis_general` at arbitrary pointings (spin 0–3); the two-stage form on prepared point sets (`prepare_points`, `sky_to_grid` / `grid_to_sky`, `grid_to_points` / `points_to_grid`) |
 | `masked.py` | `pseudo_alm`, `deconvolve`, `wiener`, `constrained_realization`, `wiener_preconditioner`, `SolveInfo` |
 | `_cache.py` | opt-in persistent compilation cache |
 
