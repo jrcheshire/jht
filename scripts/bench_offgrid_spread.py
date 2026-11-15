@@ -145,7 +145,7 @@ def run_one(a) -> dict:
         vs = jnp.real(v) if a.spin == 0 else v
         t, c = timed(jax.jit(lambda v, x, y: _nufft._spread_points(plan, v, x, y)), vs, x, y,
                      repeat=a.repeat)
-        record("spread (window)", t, c)
+        record("spread (library)", t, c)
     loc = jnp.stack([x, y], axis=1)
     field = jnp.real(v) if a.spin == 0 else jnp.stack([jnp.real(v), jnp.imag(v)])
     if any(s in stages for s in ("grouped", "interp-prepared")):
