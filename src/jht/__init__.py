@@ -76,7 +76,7 @@ from .offgrid import (
 )
 from .weights import pixel_weights, ring_weights
 
-__version__ = "0.4.1"  # single source of truth; pyproject reads this via hatch
+__version__ = "0.5.0"  # single source of truth; pyproject reads this via hatch
 __author__ = "James Cheshire"
 __email__ = "cheshire@caltech.edu"
 

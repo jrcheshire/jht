@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
 ### Added
 - **Off-grid transform in two stages, on prepared point sets.** `jht.prepare_points(loc,
   *, lmax, epsilon, store_weights=False, group_size=None)` fixes each point's NUFFT
@@ -267,7 +269,8 @@ the name `jht` is unavailable on PyPI). GitHub repo and import package stay `jht
   ring assembly) make the adjoint and off-grid forward fast and let nside=2048 compile.
   Parity + diagnostic harnesses `scripts/gpu_check.py`, `scripts/gpu_diagnostic.py`.
 
-[Unreleased]: https://github.com/jrcheshire/jht/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jrcheshire/jht/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jrcheshire/jht/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jrcheshire/jht/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jrcheshire/jht/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jrcheshire/jht/compare/v0.2.0...v0.3.0
