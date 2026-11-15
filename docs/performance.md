@@ -92,6 +92,42 @@ nside=2048.
 Ring weights and the accuracy matrix are in `docs/accuracy.md`; partial-sky analysis in
 `docs/masked.md`.
 
+## Off-grid stencil step (CPU)
+
+The off-grid transforms (`docs/offgrid.md`) cost a point-independent half (Legendre
+step + DFS + FFTs: 84 ms forward, 92 ms transposed at lmax 256, spin 2) plus a stencil
+step per point. Stencil step, ns per point, positions and values in, kernel weights
+computed in the call (`pixi run python scripts/bench_offgrid_spread.py`; M4 Max, 12
+performance cores, jax 0.9.2, lmax 256, ε = 1e-10 so W = 14, spin 2 unless noted):
+
+| point set | per-cell scatter-add (reference) | per-point window (`adjoint_synthesis_general`) | grouped (`points_to_grid`, prepared) | grouped, stored weights |
+|---|---:|---:|---:|---:|
+| dense patch, 2^18 points (~100 per cell) | 300 | 189 | 45 | — |
+| dense patch, 2^20 points | — | — | 42 | 34 |
+| uniform sphere, 2^18 points (1.3 per cell) | 329 | 210 | 177 | 168 |
+| uniform sphere, 2^18, spin 0 (real spread) | 325 | 164 | — | — |
+
+- The forward gather is 32–38 ns per point (`synthesis_general`, `grid_to_points`), 22
+  with stored weights.
+- `prepare_points` costs 55–125 ns per point once (more with `store_weights=True`, which
+  compiles the weight kernel on first use). The default `group_size=16` was the fastest
+  of 8 / 16 / 32 on dense sets; on sparse sets the group size makes no difference.
+- Peak process RSS for the grouped spread of 2^20 dense points: 1.4 GB. The per-point
+  forms hold `(Npts, W, W)` arrays, ~3 kB per point.
+
+**Spread by platform.** The window and grouped spreads are the CPU path. Off CPU the
+transforms use the per-cell scatter-add (`jax.lax.platform_dependent`, chosen when the
+program is lowered; the forms agree to ~1e-15). Measured on an RTX 3050 (6 GB, consumer
+fp64), same settings, ns per point:
+
+| point set | per-cell scatter-add | per-point window | grouped (group size 32) | forward gather |
+|---|---:|---:|---:|---:|
+| dense patch, 2^18 | 58 | 73 | 101 | 55 |
+| uniform sphere, 2^18 | 66 | 85 | 64 | 55 |
+
+There the Legendre half (68 ms forward, 79 ms transposed) dominates either way.
+Datacenter GPUs were not measured.
+
 ## GPU performance
 
 Full method and numbers in `docs/gpu.md`. A100 / V100, fp64: synthesis 14–60× an 8-core

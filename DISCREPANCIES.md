@@ -92,3 +92,21 @@ spin** (the on-grid 0/2 path never exposed it) but flips the result for **odd sp
 (1, 3)**. Pinned by matching ducc0's `synthesis_general` for spin 1/3 (a sign probe;
 `tests/test_offgrid.py::test_forward_vs_ducc` covers all of spin 0–3). Documented so
 the even-only on-grid convention is not assumed to carry over to odd spin.
+
+## Off-grid: pointing gradient on exact grid nodes depends on compiled rounding (expected, not a defect)
+
+At a point exactly on a node of the NUFFT's oversampled grid, one stencil tap sits at
+the edge of the ES kernel's support, `|t| = W/2`, where the kernel is `~e^-beta` and its
+derivative is singular (`~1/sqrt(distance to the edge)`). The value is unaffected (the
+tap is zero or `~e^-beta`, below every kernel tier), but the gradient with respect to
+`loc` at such a point depends on how the grid coordinate `xi` is rounded: a compiled
+program may fuse the multiply into neighbouring operations, putting `xi` a few ulps
+inside the support. Measured: compiled and eager `adjoint_synthesis_general` pointing
+gradients differ by ~4e-8 relative on node points (~1e-16 elsewhere); the prepared-point
+path behaves identically.
+
+- **Status:** expected property of the kernel at its support boundary; not specific to
+  any one path. Off-node points are unaffected. Gates compare gradients eager with eager
+  and compiled with compiled (`tests/test_offgrid_prepared.py`); finiteness on grid-aligned
+  points is gated in `tests/test_diff_offgrid.py`.
+
