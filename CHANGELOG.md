@@ -13,10 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (a_lm <-> the NUFFT's oversampled grid, the point-independent half) and
   `jht.grid_to_points` / `jht.points_to_grid` (grid <-> a prepared point set) compose to
   `synthesis_general` / `adjoint_synthesis_general`. Grids from several point blocks add,
-  so a transposed pass over many blocks pays the Legendre step once. `points_to_grid`
-  writes one block per group of points sharing a cell: 42-45 ns per point on dense point
-  sets and ~175 on uniform ones, against ~300-330 for a per-cell scatter-add (CPU, lmax
-  256, epsilon 1e-10), for arbitrary pointings. Pointing-differentiable with `loc`
+  so a transposed pass over many blocks pays the Legendre step once. On CPU
+  `points_to_grid` writes one block per group of points sharing a cell: 42-45 ns per
+  point on dense point sets and ~175 on uniform ones, against ~300-330 for a per-cell
+  scatter-add (lmax 256, epsilon 1e-10), for arbitrary pointings. Off CPU it uses the
+  per-cell scatter-add, which is faster there (RTX 3050). Pointing-differentiable with `loc`
   passed; a point outside its prepared cell raises (concrete `loc`) or gives NaN
   (traced). `store_weights=True` keeps the kernel weights instead (no `loc`, no pointing
   gradient). `jht.offgrid_grid_shape`, `jht.PreparedPoints`.
@@ -24,9 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `scripts/bench_offgrid_spread.py`: off-grid stage timings and peak memory.
 
 ### Changed
-- `adjoint_synthesis_general` spreads with one `(W, W)` window write per point instead
-  of a per-cell scatter-add: 1.5-1.6x faster stencil step (spin > 0) and 2x for spin 0,
-  which now spreads a real grid. Results agree with the previous formulation to
+- On CPU, `adjoint_synthesis_general` spreads with one `(W, W)` window write per point
+  instead of a per-cell scatter-add: 1.5-1.6x faster stencil step (spin > 0) and 2x for
+  spin 0, which now spreads a real grid. Other platforms keep the per-cell scatter-add
+  (`jax.lax.platform_dependent`). Results agree with the previous formulation to
   roundoff (~1e-15 relative).
 
 ## [0.4.1] - 2026-11-12

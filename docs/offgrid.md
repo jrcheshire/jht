@@ -50,7 +50,8 @@ alm  = jht.grid_to_sky(g, spin=spin, lmax=lmax)           # == adjoint_synthesis
   transposes in the `(2 − δ_{m0})` metric on aₗₘ and `Re Σ conj(g₁) g₂` on the grid.
 - **Prepared points.** `prepare_points` fixes each point's stencil cell and groups the
   points by cell, so `points_to_grid` sums each group's `(W, W)` block and writes it once
-  (6–7× the per-point spread on dense sets, ~2× on sparse ones; `performance.md`).
+  (on CPU: 6–7× the per-point spread on dense sets, ~2× on sparse ones; on GPU the
+  per-cell scatter-add is faster and is used instead; `performance.md`).
   Groups hold up to `group_size` points (default 16); a cell with fewer uses the next
   power of two, so padding stays under 2× at any density. Nothing is assumed about the
   pointing. Prepare the points with the grid's `lmax` and `epsilon`: the grid shape is
@@ -83,9 +84,10 @@ arXiv:2304.10431), clean-roomed in pure JAX. Per helicity component:
    the kernel FT), zero-pad to the σ-oversampled grid, IFFT2, then **ES-kernel**
    (`exp(β(√(1−(2t/W)²)−1))`, Barnett+ 2019) separable interpolation onto the
    points. Implemented in `jht._nufft` (type-2 `nufft2d2` + its exact transpose
-   type-1 `nufft2d1`). The transposed (spreading) step writes one `(W, W)` window per
-   point, or per group of prepared points, onto the grid padded by `W − 1`, then folds
-   the padding back onto the periodic grid.
+   type-1 `nufft2d1`). On CPU the transposed (spreading) step writes one `(W, W)`
+   window per point, or per group of prepared points, onto the grid padded by `W − 1`,
+   then folds the padding back onto the periodic grid; on other platforms it is a
+   per-cell scatter-add (selected when the program is lowered).
 
 The adjoint reverses each step (type-1 NUFFT → transposed DFS/FFT → `adjoint_contract`).
 Code: `jht._nufft` (the 2D NUFFT) and `jht.offgrid` (the DFS + spin channels); the

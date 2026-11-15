@@ -104,6 +104,9 @@ A100 (whole card and 10–25 GB MIG slices) and V100-16GB, float64
   - lmax=1000 with 10⁶ points peaks at ~1.1 GB, because XLA fuses the `(Npts, W, W)`
     stencil rather than materializing it;
   - the pointing gradient costs ~1× a forward.
+  - the transposed stencil step uses a per-cell scatter-add on GPU (atomic adds); on
+    an RTX 3050 it beats the CPU path's window and grouped spreads (58–66 vs 64–101 ns
+    per point at lmax 256; `performance.md`).
 - **Batched synthesis:** per-realization time falls with batch size, e.g. 286 → 168 ms
   at nside=512 (batch 1 → 4).
 - **nside=2048:** synthesis and `map2alm` compile and run on a 20 GB MIG slice and

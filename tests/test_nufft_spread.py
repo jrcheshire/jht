@@ -125,3 +125,24 @@ def test_grouped_spread_matches_per_cell_reference(Nk, Nm, eps, group_size, comp
 
     for out in (grouped(v, x, y, pts), jax.jit(grouped)(v, x, y, pts)):
         assert np.max(np.abs(np.asarray(out) - ref)) <= ALG_TOL * np.max(np.abs(ref))
+
+
+@pytest.mark.parametrize("Nk,Nm,eps", PLANS)
+@pytest.mark.parametrize("complex_", [False, True])
+def test_off_cpu_spreads_match_reference(Nk, Nm, eps, complex_):
+    """The per-cell scatter-add used off CPU (``platform_dependent`` default branch),
+    traced and prepared, against the reference; gated here on CPU."""
+    plan = _nufft.nufft_plan(Nk, Nm, eps)
+    x, y = _clumped(plan, 200, Nk + 7)
+    v = _vals(x.shape[0], complex_, 3)
+    ref = np.asarray(_spread_reference(plan, v, x, y))
+    lk, wk = _nufft._stencil(x, plan.nk, plan.W, plan.beta_k)
+    lm, wm = _nufft._stencil(y, plan.nm, plan.W, plan.beta_m)
+    blocks = (wk[:, :, None] * wm[:, None, :]) * v[:, None, None]
+    traced = np.asarray(_nufft._scatter_cells(plan, blocks, lk, lm))
+    pts = _nufft.prepare_points_plan((Nk, Nm, eps), np.asarray(x), np.asarray(y),
+                                     group_size=16, store_weights=True)
+    prepared = np.asarray(jax.jit(lambda *a: _nufft._spread_prepared_cells(plan, *a))(
+        v, pts.wk, pts.wm, pts.base))
+    for out in (traced, prepared):
+        assert np.max(np.abs(out - ref)) <= ALG_TOL * np.max(np.abs(ref))

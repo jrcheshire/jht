@@ -115,6 +115,19 @@ performance cores, jax 0.9.2, lmax 256, ε = 1e-10 so W = 14, spin 2 unless note
 - Peak process RSS for the grouped spread of 2^20 dense points: 1.4 GB. The per-point
   forms hold `(Npts, W, W)` arrays, ~3 kB per point.
 
+**Spread by platform.** The window and grouped spreads are the CPU path. Off CPU the
+transforms use the per-cell scatter-add (`jax.lax.platform_dependent`, chosen when the
+program is lowered; the forms agree to ~1e-15). Measured on an RTX 3050 (6 GB, consumer
+fp64), same settings, ns per point:
+
+| point set | per-cell scatter-add | per-point window | grouped (group size 32) | forward gather |
+|---|---:|---:|---:|---:|
+| dense patch, 2^18 | 58 | 73 | 101 | 55 |
+| uniform sphere, 2^18 | 66 | 85 | 64 | 55 |
+
+There the Legendre half (68 ms forward, 79 ms transposed) dominates either way.
+Datacenter GPUs were not measured.
+
 ## GPU performance
 
 Full method and numbers in `docs/gpu.md`. A100 / V100, fp64: synthesis 14–60× an 8-core

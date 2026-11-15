@@ -228,17 +228,31 @@ def _spread_blocks(plan: NufftPlan, blocks, starts):
     return _fold_axis(_fold_axis(gp, plan.nk, 0), plan.nm, 1)
 
 
+def _scatter_cells(plan: NufftPlan, blocks, lk, lm):
+    """Add per-point ``(N, W, W)`` blocks onto the grid cell by cell (``lk``, ``lm``:
+    ``(N, W)`` wrapped indices).  The spread used off CPU: on GPU its atomic adds beat
+    the window and grouped forms (measured on an RTX 3050; ``docs/performance.md``)."""
+    g = jnp.zeros((plan.nk, plan.nm), dtype=blocks.dtype)
+    return g.at[lk[:, :, None], lm[:, None, :]].add(blocks)
+
+
 def _spread_points(plan: NufftPlan, vals, x, y):
     """Transpose of :func:`_interp_points`: spread point values onto the grid.
 
-    One ``(W, W)`` window write per point (:func:`_spread_blocks`).  Real ``vals`` give
-    a real grid.
+    On CPU one ``(W, W)`` window write per point (:func:`_spread_blocks`); on other
+    platforms the per-cell scatter-add (:func:`_scatter_cells`).  The platform is chosen
+    when the program is lowered; the two agree to roundoff.  Real ``vals`` give a real
+    grid.
     """
     lk, wk = _stencil(x, plan.nk, plan.W, plan.beta_k)
     lm, wm = _stencil(y, plan.nm, plan.W, plan.beta_m)
     vals = jnp.asarray(vals)
     blocks = (wk[:, :, None] * wm[:, None, :]) * vals[:, None, None]
-    return _spread_blocks(plan, blocks, jnp.stack([lk[:, 0], lm[:, 0]], axis=1))
+    return jax.lax.platform_dependent(
+        blocks, lk, lm,
+        cpu=lambda b, k, m: _spread_blocks(plan, b, jnp.stack([k[:, 0], m[:, 0]], axis=1)),
+        default=lambda b, k, m: _scatter_cells(plan, b, k, m),
+    )
 
 
 def nufft2d2(plan: NufftPlan, coeffs, x, y):
@@ -408,3 +422,23 @@ def _spread_grouped(plan: NufftPlan, vals, wk, wm, buckets):
     blocks = [jnp.sum(A[s][:, :, :, None] * M[s][:, :, None, :], axis=1) for s, _ in buckets]
     starts = [st for _, st in buckets]
     return _spread_blocks(plan, jnp.concatenate(blocks), jnp.concatenate(starts))
+
+
+def _spread_prepared_cells(plan: NufftPlan, vals, wk, wm, base):
+    """Transpose of :func:`_interp_prepared` by the per-cell scatter-add (off CPU)."""
+    off = jnp.arange(plan.W)
+    lk = (base[:, 0, None] + off[None, :]) % plan.nk
+    lm = (base[:, 1, None] + off[None, :]) % plan.nm
+    blocks = (wk[:, :, None] * wm[:, None, :]) * jnp.asarray(vals)[:, None, None]
+    return _scatter_cells(plan, blocks, lk, lm)
+
+
+def _spread_prepared(plan: NufftPlan, vals, wk, wm, base, buckets):
+    """Transpose of :func:`_interp_prepared`: the grouped spread on CPU
+    (:func:`_spread_grouped`), the per-cell scatter-add elsewhere
+    (:func:`_spread_prepared_cells`), chosen when the program is lowered."""
+    return jax.lax.platform_dependent(
+        jnp.asarray(vals), wk, wm, base, buckets,
+        cpu=lambda v, a, b, _base, bk: _spread_grouped(plan, v, a, b, bk),
+        default=lambda v, a, b, bs, _bk: _spread_prepared_cells(plan, v, a, b, bs),
+    )

@@ -414,4 +414,4 @@ def points_to_grid(field, points: PreparedPoints, loc=None, *, spin: int = 0):
         raise ValueError(f"field shape {field.shape} != expected {expect}")
     wk, wm, ok = _point_weights(points, plan, loc)
     v = field if spin == 0 else field[0] + 1j * field[1]
-    return _poison(_nufft._spread_grouped(plan, v, wk, wm, points.buckets), ok)
+    return _poison(_nufft._spread_prepared(plan, v, wk, wm, points.base, points.buckets), ok)
