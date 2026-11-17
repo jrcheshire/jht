@@ -12,9 +12,12 @@ gated against the eager reference implementation (`jht._reference`) by
 1. **jit + cached plans.** The public transforms are jit-compiled; geometry, recursion
    plans and index maps are built once per `(nside, lmax, spin)` (`lru_cache` on
    `_prepare`), so `analysis`'s Jacobi iteration reuses one compiled kernel.
-2. **One fused all-m recursion.** A single `lax.scan` vectorizes the recursion over m
-   and fuses the ℓ-contraction, so the full λ table is never materialized: peak λ
-   memory is `O(M·n_θ)`, not `O(L·M·n_θ)` (≈ 16 GB per component at nside=2048).
+2. **One fused all-m recursion, contracted in ℓ-blocks.** A `lax.scan` vectorizes the
+   recursion over m. It runs in blocks of K ℓ-rows: an inner scan emits a `(K, M, n_θ)`
+   λ stack and the block is contracted with the coefficients (or the ring data, for the
+   adjoint) as one matrix product batched over m. The full λ table is never
+   materialized: peak λ memory is `O(K·M·n_θ)`, not `O(L·M·n_θ)` (≈ 16 GB per component
+   at nside=2048). See "ℓ-block size" below.
 3. **Batched ring FFTs.** The φ-FFTs are batched by ring length: the equatorial belt
    (`2·nside+1` rings) in one FFT, the polar caps by length group.
 4. **Equatorial symmetry.** The recursion runs only on the north half + equator
@@ -66,6 +69,8 @@ Per transform, the dominant live arrays are:
 - recursion carry (the fused scan): `O(M · n_θ)` per recursion state, with
   `n_θ = 2·nside` (north half) and `M = lmax+1`. spin-2 runs two states (±2)
   with a few complex accumulators → ~hundreds of MB at the ceiling, not GB.
+- the per-block λ stack: `K · M · n_θ` float64 per recursion state, capped at 512 MiB
+  by the `"auto"` block size.
 - the per-m ring coefficients `F` / `V`: `O(M · nrings)` complex.
 - the map and the batched belt FFT: `O(npix)`.
 - static plan tables (recurrence coeffs, seeds, index maps): `O(M² + M·n_θ)`,
@@ -80,6 +85,36 @@ padded to a common length. The per-group outputs are assembled by a **single com
 gather** (`pix_to_buf` / `ring_to_col` static permutations in `src/jht/healpix.py`)
 outside the ring loop; an unrolled per-group scatter would not compile on GPU at
 nside=2048.
+
+## ℓ-block size
+
+`jht.set_ell_block(k)` sets K; `"auto"` (default) takes
+`K = clamp(512 MiB // (n_stacks · M · n_θ · 8 B), 1, 32)`, i.e. K = 32 to nside ≈ 512 and
+smaller above (spin 2 keeps two stacks). K changes only the order of the ℓ-sum (the λ
+rows are identical), so results agree to rounding for every K; `K = 1` contracts one row
+at a time.
+
+The recursion does not depend on the data, so under `vmap` over maps it is computed once
+and shared, while the contraction scales with the batch. With one row at a time the
+contraction reads and writes the whole batched accumulator (or reads the batched ring
+data) once per ℓ, which is memory-bandwidth bound; a block does that once per K rows.
+A single unbatched transform is recursion-bound and K makes no difference to it.
+
+`scripts/bench_contract.py` (Apple-silicon CPU, nside=128, lmax=192, steady ms per
+`vmap`-ed call of 80 maps; the 0.5.0 column is the previous per-row contraction):
+
+| transform | 0.5.0 | K = 1 | K = 8 | K = 32 |
+|---|---:|---:|---:|---:|
+| synthesis, spin 0 | 355 | 432 | 272 | 175 |
+| adjoint, spin 0 | 398 | 591 | 161 | 132 |
+| synthesis, spin 2 | 419 | 454 | 379 | 226 |
+| adjoint, spin 2 | 616 | 1157 | 274 | 206 |
+
+Single-map times are unchanged (29.7 / 30.6 / 40.0 / 48.3 ms at K = 1 vs 29.7 / 32.7 /
+42.0 / 45.7 ms at K = 32).
+
+Reverse mode saves the λ rows per block, `(n_blocks, K, M, n_θ)` float64, where the
+per-row contraction saved complex products, so the native-AD tape is half the size.
 
 ## Known costs
 
