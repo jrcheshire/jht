@@ -31,7 +31,13 @@ import numpy as np
 
 from . import _nufft
 from ._nufft import NufftPlan, PreparedPoints, _next_size, nufft2d1, nufft2d2, nufft_plan
-from ._recursion import RecursionPlan, adjoint_contract, build_recursion_plan, synth_contract
+from ._recursion import (
+    RecursionPlan,
+    adjoint_contract,
+    build_recursion_plan,
+    get_ell_block,
+    synth_contract,
+)
 from .healpix import _tri_dense_maps, alm_metric_weight, alm_size
 
 TWO_PI = 2.0 * np.pi
@@ -153,16 +159,18 @@ def _Fkm_to_coeffs(p: _OffgridPrep, G):
 
 def _alm_to_Fkm(p: _OffgridPrep, alm):
     a, b = _channels(p, alm)
-    Cpos = synth_contract(p.plan_pos, jnp.asarray(p.x_cc), a)  # (lmax+1, ntheta_s)
+    kb = get_ell_block()
+    Cpos = synth_contract(p.plan_pos, jnp.asarray(p.x_cc), a, kb)  # (lmax+1, ntheta_s)
     # spin-0: plan_neg is plan_pos and a == b, so the -spin recursion is identical -- skip it.
-    Cneg = Cpos if p.spin == 0 else synth_contract(p.plan_neg, jnp.asarray(p.x_cc), b)
+    Cneg = Cpos if p.spin == 0 else synth_contract(p.plan_neg, jnp.asarray(p.x_cc), b, kb)
     return _coeffs_to_Fkm(p, Cpos, Cneg)
 
 
 def _Fkm_to_alm(p: _OffgridPrep, G):
     Cpos_cot, Cneg_cot = _Fkm_to_coeffs(p, G)
-    p_cot = adjoint_contract(p.plan_pos, jnp.asarray(p.x_cc), Cpos_cot)
-    n_cot = adjoint_contract(p.plan_neg, jnp.asarray(p.x_cc), Cneg_cot)
+    kb = get_ell_block()
+    p_cot = adjoint_contract(p.plan_pos, jnp.asarray(p.x_cc), Cpos_cot, kb)
+    n_cot = adjoint_contract(p.plan_neg, jnp.asarray(p.x_cc), Cneg_cot, kb)
     return _channels_adjoint(p, p_cot, n_cot)
 
 

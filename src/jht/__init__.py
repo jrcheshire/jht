@@ -34,6 +34,7 @@ from __future__ import annotations
 from ._analysis import analysis, bare_analysis, map2alm
 from ._azimuth import enable_looped_fft, get_azimuth_fft_mode, set_azimuth_fft_mode
 from ._cache import enable_compilation_cache
+from ._recursion import get_ell_block, set_ell_block
 from .diff import (
     adjoint_synthesis_general_real,
     adjoint_synthesis_vjp,
@@ -136,4 +137,7 @@ __all__ = [
     "set_azimuth_fft_mode",
     "get_azimuth_fft_mode",
     "enable_looped_fft",
+    # l-block size of the Legendre contraction (memory vs passes over the accumulators)
+    "set_ell_block",
+    "get_ell_block",
 ]

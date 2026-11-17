@@ -16,7 +16,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 import jht  # noqa: E402
-from jht import _analysis, _azimuth, _cache, diff, healpix, masked, offgrid, weights  # noqa: E402
+from jht import _analysis, _azimuth, _cache, _recursion, diff, healpix, masked, offgrid, weights  # noqa: E402
 
 EXPECTED = {
     "synthesis", "adjoint_synthesis", "analysis", "map2alm", "bare_analysis",
@@ -33,6 +33,7 @@ EXPECTED = {
     "alm_to_real", "real_to_alm", "n_dof", "alm_size", "alm_metric_weight",
     "enable_compilation_cache",
     "set_azimuth_fft_mode", "get_azimuth_fft_mode", "enable_looped_fft",
+    "set_ell_block", "get_ell_block",
 }
 
 
@@ -85,6 +86,8 @@ def test_reexports_are_the_real_objects():
     assert jht.set_azimuth_fft_mode is _azimuth.set_azimuth_fft_mode
     assert jht.get_azimuth_fft_mode is _azimuth.get_azimuth_fft_mode
     assert jht.enable_looped_fft is _azimuth.enable_looped_fft
+    assert jht.set_ell_block is _recursion.set_ell_block
+    assert jht.get_ell_block is _recursion.get_ell_block
 
 
 def test_enable_compilation_cache_sets_config(tmp_path):

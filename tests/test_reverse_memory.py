@@ -3,8 +3,9 @@
 * ``synthesis_vjp`` / ``adjoint_synthesis_vjp`` return native AD's values and
   cotangents to ``ALG_TOL`` (non-physical inputs included; not bitwise, since GPU
   compilation can fuse the two graphs differently) and block forward mode;
-* their gradient graphs keep no ``(lmax+1, lmax+1, 2 nside)`` recursion table, also
-  inside a scanned body;
+* their gradient graphs keep no recursion table spanning every l row (``(lmax+1, M, T)``
+  or its l-blocked form ``(n_blocks, K, M, T)``, M = lmax+1, T = 2 nside), also inside a
+  scanned body;
 * the default save-nothing checkpoint around each kernel keeps forward mode working
   and stops a scanned body from hoisting extra recursion tables on the native path.
 """
@@ -21,11 +22,23 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+import jht  # noqa: E402
 from jht.diff import adjoint_synthesis_vjp, synthesis_vjp  # noqa: E402
 from jht.healpix import adjoint_synthesis, alm_size, synthesis  # noqa: E402
 
 ALG_TOL = 1e-12  # a-priori, as tests/test_grad.py
 NSIDE, LMAX, NSIM = 16, 24, 4
+# K < lmax+1, so a per-block working stack (K, M, T) is distinguishable from an all-l tape;
+# "auto" would give K = 32 >= lmax+1 = 25 at this fixture.
+ELL_BLOCK = 5
+
+
+@pytest.fixture(autouse=True)
+def _pin_ell_block():
+    old = jht.get_ell_block()
+    jht.set_ell_block(ELL_BLOCK)
+    yield
+    jht.set_ell_block(old)
 
 
 def _rand_alm(rng, spin, n=None):
@@ -88,15 +101,21 @@ def test_native_forward_mode_survives_checkpoint(spin):
 
 
 # --------------------------------------------------------------------------- #
-# memory gates: (lmax+1, lmax+1, 2 nside) recursion tables in the gradient graph
+# memory gates: all-l recursion tables in the gradient graph
 # --------------------------------------------------------------------------- #
 def _table_count(fn, *args) -> int:
-    """Distinct HLO values shaped ``(lmax+1, lmax+1, 2 nside)`` in the compiled graph."""
-    pat = re.compile(rf"(c128|f64)\[{LMAX + 1},{LMAX + 1},{2 * NSIDE}\]")
+    """Distinct HLO values that hold a recursion table for every l row.
+
+    Shape ``(..., M, 2 nside)`` with the leading dims multiplying to ``>= lmax+1``:
+    ``(lmax+1, M, T)`` unblocked, ``(n_blocks, K, M, T)`` blocked.  The per-block
+    working stack ``(K, M, T)`` (K < lmax+1) does not count.
+    """
+    pat = re.compile(rf"(c128|f64)\[((?:\d+,)*){LMAX + 1},{2 * NSIDE}\]")
     txt = jax.jit(fn).lower(*args).compile().as_text()
     names = set()
     for line in txt.splitlines():
-        if pat.search(line):
+        hit = pat.search(line)
+        if hit and int(np.prod([int(d) for d in hit.group(2).split(",") if d])) >= LMAX + 1:
             m = re.match(r"\s*%?([A-Za-z_0-9.-]+) =", line)
             if m:
                 names.add(m.group(1))
@@ -136,8 +155,8 @@ def test_synthesis_vjp_in_sim_scan_hoists_no_recursion_table():
 def test_native_grad_in_sim_scan_hoists_no_recursion_table():
     """The default checkpoint stops a scanned body hoisting the recursion out of the loop.
 
-    Measured at this fixture: 0 with the checkpoint, 44 with ``healpix._opaque`` removed
-    (the wrapper scan gate above also reads 44 without it)."""
+    Measured at this fixture: 0 with the checkpoint, 16 with ``healpix._opaque`` removed
+    (the wrapper scan gate above also reads 16 without it)."""
     A = _rand_alm(np.random.default_rng(143), 2, NSIM)
     loss = _scan_loss(synthesis)
     assert _table_count(lambda s, X: jax.grad(loss)(s, X), 1.0, A) == 0
@@ -147,7 +166,7 @@ def test_native_grad_wrt_alm_keeps_recursion_tape():
     """Native AD w.r.t. the alm does keep tables: the zero counts above come from a live
     pattern, and the wrappers' zero is the custom_vjp's doing.
 
-    Measured at this fixture: 36, with or without the per-kernel checkpoint."""
+    Measured at this fixture: 18, with or without the per-kernel checkpoint."""
     a = _rand_alm(np.random.default_rng(144), 2)
     loss = _synth_loss(synthesis)
     assert _table_count(lambda z: jax.grad(loss)(z), a) > 0

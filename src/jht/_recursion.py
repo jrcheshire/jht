@@ -455,58 +455,170 @@ def _rec_step(p, q, s, A_c, B_c, C_c, is_seed_c, is_active_c, x, seed_sign, seed
     return new_p, new_q, new_s, lam
 
 
-def synth_contract(plan: RecursionPlan, x, alm_dense) -> jax.Array:
+# --------------------------------------------------------------------------- #
+# l-blocked contraction.
+#
+# The recursion state (p, q, s) does not depend on the data, so under ``vmap`` over
+# maps it is computed once and shared; only the contraction scales with the batch.
+# Contracting one l-row at a time streams the whole (batch, M, T) accumulator (or,
+# for the adjoint, the batched data) through memory once per l, which is
+# bandwidth-bound.  Every contraction below instead runs the unchanged per-l
+# recursion over a block of K rows (an inner ``lax.scan`` emitting a (K, M, T)
+# lambda stack) and contracts the block as one batched-over-m matrix product.
+# lambda is bitwise unchanged; only the order of the l-sum differs.  Peak extra
+# memory is the lambda stack, O(K.M.T), never the full (L, M, T) table.
+# --------------------------------------------------------------------------- #
+_ELL_BLOCK: int | str = "auto"
+_ELL_BLOCK_MAX = 32
+_ELL_BLOCK_BUDGET_BYTES = 512 * 2**20  # lambda-stack budget for the "auto" rule
+
+
+def set_ell_block(k: int | str) -> None:
+    """Set the l-block size ``K`` of the Legendre contraction for subsequent transforms.
+
+    ``"auto"`` (default) picks ``K = clamp(budget // (n_stacks * M * T * 8), 1, 32)``
+    with a 512 MiB budget for the per-block lambda stack(s): ``K = 32`` up to
+    nside ~ 512 and smaller at high nside.  An integer ``k >= 1`` pins it; ``k = 1``
+    contracts one l-row at a time.  Results agree to rounding for every ``K``; the
+    choice trades memory (O(K M T) per stack) for fewer passes over the
+    accumulators, which matters for batched (``vmap``) transforms on GPU.
+
+    Process-global, like :func:`jht.set_azimuth_fft_mode`; it is part of the
+    transform cache key, so changing it compiles fresh kernels.
+    """
+    if isinstance(k, bool) or not (k == "auto" or (isinstance(k, int) and k >= 1)):
+        raise ValueError(f"ell block must be 'auto' or an int >= 1, got {k!r}")
+    global _ELL_BLOCK
+    _ELL_BLOCK = k
+
+
+def get_ell_block() -> int | str:
+    """Return the current l-block setting (see :func:`set_ell_block`)."""
+    return _ELL_BLOCK
+
+
+def resolve_ell_block(setting: int | str, M: int, T: int, n_stacks: int = 1) -> int:
+    """Block size ``K`` for an ``(M, T)`` recursion with ``n_stacks`` lambda stacks."""
+    if setting == "auto":
+        k = _ELL_BLOCK_BUDGET_BYTES // max(1, n_stacks * M * T * 8)
+        return int(min(_ELL_BLOCK_MAX, max(1, k)))
+    return int(setting)
+
+
+def _blocked(rows, K: int):
+    """Pad l-major arrays (leading axis L1) to ``nb*K`` rows and reshape to ``(nb, K, ...)``.
+
+    Padding is zero / ``False``: a row with ``is_active = is_seed = False`` is a no-op
+    step of :func:`_rec_step` (carry unchanged, lambda = 0) with zero coefficients.
+    """
+    L1 = rows[0].shape[0]
+    nb = -(-L1 // K)
+    n_pad = nb * K - L1
+    out = []
+    for a in rows:
+        a = jnp.asarray(a)
+        if n_pad:
+            a = jnp.pad(a, [(0, n_pad)] + [(0, 0)] * (a.ndim - 1))
+        out.append(a.reshape((nb, K) + a.shape[1:]))
+    return tuple(out)
+
+
+def _synth_gemm(c, lam):
+    """``sum_k c[s,k,m] lam[k,m,t]`` -> ``(S, M, T)`` complex; ``c`` complex, ``lam`` real.
+
+    Real and imaginary parts go through one real contraction, so ``lam`` is never
+    promoted to complex.
+    """
+    S = c.shape[0]
+    cr = jnp.concatenate([jnp.real(c), jnp.imag(c)], axis=0)  # (2S, K, M)
+    out = jnp.einsum("skm,kmt->smt", cr, lam)
+    return jax.lax.complex(out[:S], out[S:])
+
+
+def _adj_gemm(lam, V):
+    """``sum_t lam[k,m,t] V[s,m,t]`` -> ``(S, K, M)`` complex; ``lam`` real, ``V`` complex."""
+    S = V.shape[0]
+    Vr = jnp.concatenate([jnp.real(V), jnp.imag(V)], axis=0)  # (2S, M, T)
+    out = jnp.einsum("kmt,smt->skm", lam, Vr)
+    return jax.lax.complex(out[:S], out[S:])
+
+
+def _parity(lmax: int):
+    return jnp.asarray(np.where(np.arange(lmax + 1) % 2 == 0, 1.0, -1.0))
+
+
+def _one_state_step(x, seed_sign, seed_log):
+    def step(carry, xs):
+        p, q, s = carry
+        A_c, B_c, C_c, seed_c, act_c = xs
+        p, q, s, lam = _rec_step(p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log)
+        return (p, q, s), lam
+
+    return step
+
+
+def _two_state_step(x, ssp, slp, ssm, slm):
+    def step(carry, xs):
+        pp, qp, sp, pm, qm, sm = carry
+        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, sd_c, ac_c = xs
+        pp, qp, sp, lam_p = _rec_step(pp, qp, sp, Ap_c, Bp_c, Cp_c, sd_c, ac_c, x, ssp, slp)
+        pm, qm, sm, lam_m = _rec_step(pm, qm, sm, Am_c, Bm_c, Cm_c, sd_c, ac_c, x, ssm, slm)
+        return (pp, qp, sp, pm, qm, sm), (lam_p, lam_m)
+
+    return step
+
+
+def synth_contract(plan: RecursionPlan, x, alm_dense, ell_block: int | str = "auto") -> jax.Array:
     """``F_m(theta) = sum_l alm_dense[m,l] * lambda^s_{l,m}(theta)`` for all m.
 
     ``alm_dense`` is the dense ``(M, lmax+1)`` coefficient grid (``a_{l,m}``, zero
     where ``l < lmin(m)``).  Returns ``F`` of shape ``(M, n_theta)`` complex --
-    the per-m ring coefficients before the phi-FFT.
+    the per-m ring coefficients before the phi-FFT.  ``ell_block``: see
+    :func:`set_ell_block`.
     """
     A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
     x = jnp.asarray(x)
     M, T = seed_log.shape
-    alm_T = jnp.asarray(alm_dense).T  # (L1, M)
+    K = resolve_ell_block(ell_block, M, T, 1)
+    coef = jnp.asarray(alm_dense).T * pref  # (L1, M)
+    step = _one_state_step(x, seed_sign, seed_log)
 
-    def body(carry, xs):
-        p, q, s, F = carry
-        A_c, B_c, C_c, pref_c, alm_c, seed_c, act_c = xs
-        new_p, new_q, new_s, lam = _rec_step(
-            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
-        )
-        F = F + (alm_c * pref_c)[:, None] * lam
-        return (new_p, new_q, new_s, F), None
+    def block(carry, xs):
+        rec, F = carry
+        A_k, B_k, C_k, c_k, sd_k, ac_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
+        return (rec, F + _synth_gemm(c_k[None], lam)[0]), None
 
     z = jnp.zeros((M, T), dtype=jnp.float64)
-    init = (z, z, z, jnp.zeros((M, T), dtype=jnp.complex128))
-    (_, _, _, F), _ = jax.lax.scan(body, init, (A, B, C, pref, alm_T, is_seed, is_active))
+    init = ((z, z, z), jnp.zeros((M, T), dtype=jnp.complex128))
+    (_, F), _ = jax.lax.scan(block, init, _blocked((A, B, C, coef, is_seed, is_active), K))
     return F
 
 
-def adjoint_contract(plan: RecursionPlan, x, V) -> jax.Array:
+def adjoint_contract(plan: RecursionPlan, x, V, ell_block: int | str = "auto") -> jax.Array:
     """``b_{l,m} = sum_theta lambda^s_{l,m}(theta) * V[m,theta]`` for all (l, m).
 
     ``V`` is the ``(M, n_theta)`` per-m ring data (post phi-FFT).  Returns the
     dense ``(M, lmax+1)`` coefficient grid ``b_{l,m}`` (zero where ``l<lmin(m)``).
     This is the l-contraction of the exact adjoint; the FFT side lives in
-    ``healpix.py``.
+    ``healpix.py``.  ``ell_block``: see :func:`set_ell_block`.
     """
     A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
     x = jnp.asarray(x)
     V = jnp.asarray(V)
     M, T = seed_log.shape
+    L1 = plan.lmax + 1
+    K = resolve_ell_block(ell_block, M, T, 1)
+    step = _one_state_step(x, seed_sign, seed_log)
 
-    def body(carry, xs):
-        p, q, s = carry
-        A_c, B_c, C_c, pref_c, seed_c, act_c = xs
-        new_p, new_q, new_s, lam = _rec_step(
-            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
-        )
-        b_col = pref_c * jnp.sum(lam * V, axis=1)  # (M,)
-        return (new_p, new_q, new_s), b_col
+    def block(rec, xs):
+        A_k, B_k, C_k, pref_k, sd_k, ac_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
+        return rec, pref_k * _adj_gemm(lam, V[None])[0]  # (K, M)
 
     z = jnp.zeros((M, T), dtype=jnp.float64)
-    _, b = jax.lax.scan(body, (z, z, z), (A, B, C, pref, is_seed, is_active))  # b: (L1, M)
-    return b.T
+    _, b = jax.lax.scan(block, (z, z, z), _blocked((A, B, C, pref, is_seed, is_active), K))
+    return b.reshape(-1, M)[:L1].T
 
 
 # --------------------------------------------------------------------------- #
@@ -524,7 +636,7 @@ def adjoint_contract(plan: RecursionPlan, x, V) -> jax.Array:
 # *together* over the half grid (still one half-grid pass each -> the 2x win), but
 # with the south hemisphere of each channel built from the *other* spin's column.
 # --------------------------------------------------------------------------- #
-def synth_contract_eo(plan: RecursionPlan, x, alm_dense):
+def synth_contract_eo(plan: RecursionPlan, x, alm_dense, ell_block: int | str = "auto"):
     """Half-grid synthesis (spin-0): returns ``(F_total, F_signed)`` of shape ``(M, T)``.
 
     ``F_total = sum_l alm pref lambda``  and  ``F_signed = sum_l (-1)^l alm pref lambda``
@@ -534,28 +646,25 @@ def synth_contract_eo(plan: RecursionPlan, x, alm_dense):
     A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
     x = jnp.asarray(x)
     M, T = seed_log.shape
-    alm_T = jnp.asarray(alm_dense).T  # (L1, M)
-    par = jnp.asarray(np.where(np.arange(plan.lmax + 1) % 2 == 0, 1.0, -1.0))
+    K = resolve_ell_block(ell_block, M, T, 1)
+    coef = jnp.asarray(alm_dense).T * pref  # (L1, M)
+    par = _parity(plan.lmax)
+    step = _one_state_step(x, seed_sign, seed_log)
 
-    def body(carry, xs):
-        p, q, s, Ftot, Fsig = carry
-        A_c, B_c, C_c, pref_c, alm_c, seed_c, act_c, par_c = xs
-        new_p, new_q, new_s, lam = _rec_step(
-            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
-        )
-        c = (alm_c * pref_c)[:, None] * lam
-        return (new_p, new_q, new_s, Ftot + c, Fsig + par_c * c), None
+    def block(carry, xs):
+        rec, F = carry
+        A_k, B_k, C_k, c_k, sd_k, ac_k, par_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
+        return (rec, F + _synth_gemm(jnp.stack([c_k, par_k[:, None] * c_k]), lam)), None
 
     z = jnp.zeros((M, T), dtype=jnp.float64)
-    zc = jnp.zeros((M, T), dtype=jnp.complex128)
-    init = (z, z, z, zc, zc)
-    (_, _, _, Ftot, Fsig), _ = jax.lax.scan(
-        body, init, (A, B, C, pref, alm_T, is_seed, is_active, par)
-    )
-    return Ftot, Fsig
+    init = ((z, z, z), jnp.zeros((2, M, T), dtype=jnp.complex128))
+    xs = _blocked((A, B, C, coef, is_seed, is_active, par), K)
+    (_, F), _ = jax.lax.scan(block, init, xs)
+    return F[0], F[1]
 
 
-def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs):
+def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs, ell_block: int | str = "auto"):
     """Half-grid adjoint (spin-0): ``b_{l,m} = sum_theta lambda (Vn + (-1)^l Vs)``.
 
     ``Vn`` is the north-half per-m data, ``Vs = (-1)^m V_south`` (the reflected
@@ -564,23 +673,23 @@ def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs):
     """
     A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
     x = jnp.asarray(x)
-    Vn = jnp.asarray(Vn)
-    Vs = jnp.asarray(Vs)
+    V = jnp.stack([jnp.asarray(Vn), jnp.asarray(Vs)])  # (2, M, T)
     M, T = seed_log.shape
-    par = jnp.asarray(np.where(np.arange(plan.lmax + 1) % 2 == 0, 1.0, -1.0))
+    L1 = plan.lmax + 1
+    K = resolve_ell_block(ell_block, M, T, 1)
+    par = _parity(plan.lmax)
+    step = _one_state_step(x, seed_sign, seed_log)
 
-    def body(carry, xs):
-        p, q, s = carry
-        A_c, B_c, C_c, pref_c, seed_c, act_c, par_c = xs
-        new_p, new_q, new_s, lam = _rec_step(
-            p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log
-        )
-        b_col = pref_c * (jnp.sum(lam * Vn, axis=1) + par_c * jnp.sum(lam * Vs, axis=1))
-        return (new_p, new_q, new_s), b_col
+    def block(rec, xs):
+        A_k, B_k, C_k, pref_k, sd_k, ac_k, par_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
+        g = _adj_gemm(lam, V)  # (2, K, M)
+        return rec, pref_k * (g[0] + par_k[:, None] * g[1])
 
     z = jnp.zeros((M, T), dtype=jnp.float64)
-    _, b = jax.lax.scan(body, (z, z, z), (A, B, C, pref, is_seed, is_active, par))
-    return b.T
+    xs = _blocked((A, B, C, pref, is_seed, is_active, par), K)
+    _, b = jax.lax.scan(block, (z, z, z), xs)
+    return b.reshape(-1, M)[:L1].T
 
 
 def _two_state_arrays(plan_p: RecursionPlan, plan_m: RecursionPlan, x):
@@ -591,45 +700,46 @@ def _two_state_arrays(plan_p: RecursionPlan, plan_m: RecursionPlan, x):
     """
     Ap, Bp, Cp, pref, ssp, slp, is_seed, is_active = _plan_arrays(plan_p)
     Am, Bm, Cm, _pf, ssm, slm, _is, _ia = _plan_arrays(plan_m)
-    par = jnp.asarray(np.where(np.arange(plan_p.lmax + 1) % 2 == 0, 1.0, -1.0))
+    par = _parity(plan_p.lmax)
     return Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, jnp.asarray(x)
 
 
-def synth_contract_spin2_ns(plan_p, plan_m, x, bp_dense, bm_dense):
+def synth_contract_spin2_ns(plan_p, plan_m, x, bp_dense, bm_dense, ell_block: int | str = "auto"):
     """Half-grid spin-2 synthesis.  Returns ``(Fp_north, Fp_south, Fm_north, Fm_south)``.
 
     ``bp = -(aE + i aB)``, ``bm = -(aE - i aB)`` (dense ``(M, lmax+1)``).  The
-    south halves still carry the ``(-1)^m`` factor for the caller to apply.
+    south halves still carry the ``(-1)^m`` factor for the caller to apply.  The
+    south of each channel uses the *other* spin's column.
     """
     Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, x = (
         _two_state_arrays(plan_p, plan_m, x)
     )
     M, T = slp.shape
-    bpT = jnp.asarray(bp_dense).T
-    bmT = jnp.asarray(bm_dense).T
+    K = resolve_ell_block(ell_block, M, T, 2)
+    cp = jnp.asarray(bp_dense).T * pref  # (L1, M)
+    cm = jnp.asarray(bm_dense).T * pref
+    step = _two_state_step(x, ssp, slp, ssm, slm)
 
-    def body(carry, xs):
-        pp, qp, sp, pm, qm, sm, FpN, FpS, FmN, FmS = carry
-        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, pref_c, bp_c, bm_c, sd_c, ac_c, par_c = xs
-        pp, qp, sp, lam_p = _rec_step(pp, qp, sp, Ap_c, Bp_c, Cp_c, sd_c, ac_c, x, ssp, slp)
-        pm, qm, sm, lam_m = _rec_step(pm, qm, sm, Am_c, Bm_c, Cm_c, sd_c, ac_c, x, ssm, slm)
-        cp = (bp_c * pref_c)[:, None]
-        cm = (bm_c * pref_c)[:, None]
-        FpN = FpN + cp * lam_p
-        FpS = FpS + par_c * cp * lam_m  # south of +channel uses the -2 column
-        FmN = FmN + cm * lam_m
-        FmS = FmS + par_c * cm * lam_p  # south of -channel uses the +2 column
-        return (pp, qp, sp, pm, qm, sm, FpN, FpS, FmN, FmS), None
+    def block(carry, xs):
+        rec, Fp, Fm = carry  # Fp = (FpN, FmS) from lambda_+, Fm = (FmN, FpS) from lambda_-
+        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, cp_k, cm_k, sd_k, ac_k, par_k = xs
+        rec, (lam_p, lam_m) = jax.lax.scan(
+            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k)
+        )
+        pk = par_k[:, None]
+        Fp = Fp + _synth_gemm(jnp.stack([cp_k, pk * cm_k]), lam_p)
+        Fm = Fm + _synth_gemm(jnp.stack([cm_k, pk * cp_k]), lam_m)
+        return (rec, Fp, Fm), None
 
     z = jnp.zeros((M, T), dtype=jnp.float64)
-    zc = jnp.zeros((M, T), dtype=jnp.complex128)
-    init = (z, z, z, z, z, z, zc, zc, zc, zc)
-    xs = (Ap, Bp, Cp, Am, Bm, Cm, pref, bpT, bmT, is_seed, is_active, par)
-    (_, _, _, _, _, _, FpN, FpS, FmN, FmS), _ = jax.lax.scan(body, init, xs)
-    return FpN, FpS, FmN, FmS
+    zc = jnp.zeros((2, M, T), dtype=jnp.complex128)
+    init = ((z, z, z, z, z, z), zc, zc)
+    xs = _blocked((Ap, Bp, Cp, Am, Bm, Cm, cp, cm, is_seed, is_active, par), K)
+    (_, Fp, Fm), _ = jax.lax.scan(block, init, xs)
+    return Fp[0], Fm[1], Fm[0], Fp[1]
 
 
-def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm):
+def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm, ell_block: int | str = "auto"):
     """Half-grid spin-2 adjoint.  Returns ``(p2, m2)`` dense ``(M, lmax+1)``.
 
     ``Vpn / Vmn`` are the north-half +/- channel data; ``Sp = (-1)^m Vp_south``,
@@ -641,18 +751,23 @@ def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm):
         _two_state_arrays(plan_p, plan_m, x)
     )
     M, T = slp.shape
-    Vpn, Sp, Vmn, Sm = (jnp.asarray(a) for a in (Vpn, Sp, Vmn, Sm))
+    L1 = plan_p.lmax + 1
+    K = resolve_ell_block(ell_block, M, T, 2)
+    Vp = jnp.stack([jnp.asarray(Vpn), jnp.asarray(Sm)])  # contracted with lambda_+
+    Vm = jnp.stack([jnp.asarray(Vmn), jnp.asarray(Sp)])  # contracted with lambda_-
+    step = _two_state_step(x, ssp, slp, ssm, slm)
 
-    def body(carry, xs):
-        pp, qp, sp, pm, qm, sm = carry
-        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, pref_c, sd_c, ac_c, par_c = xs
-        pp, qp, sp, lam_p = _rec_step(pp, qp, sp, Ap_c, Bp_c, Cp_c, sd_c, ac_c, x, ssp, slp)
-        pm, qm, sm, lam_m = _rec_step(pm, qm, sm, Am_c, Bm_c, Cm_c, sd_c, ac_c, x, ssm, slm)
-        p2 = pref_c * (jnp.sum(lam_p * Vpn, axis=1) + par_c * jnp.sum(lam_m * Sp, axis=1))
-        m2 = pref_c * (jnp.sum(lam_m * Vmn, axis=1) + par_c * jnp.sum(lam_p * Sm, axis=1))
-        return (pp, qp, sp, pm, qm, sm), (p2, m2)
+    def block(rec, xs):
+        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, pref_k, sd_k, ac_k, par_k = xs
+        rec, (lam_p, lam_m) = jax.lax.scan(
+            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k)
+        )
+        gp = _adj_gemm(lam_p, Vp)  # (2, K, M): [lam_+ . Vpn, lam_+ . Sm]
+        gm = _adj_gemm(lam_m, Vm)  # (2, K, M): [lam_- . Vmn, lam_- . Sp]
+        pk = par_k[:, None]
+        return rec, (pref_k * (gp[0] + pk * gm[1]), pref_k * (gm[0] + pk * gp[1]))
 
     z = jnp.zeros((M, T), dtype=jnp.float64)
-    xs = (Ap, Bp, Cp, Am, Bm, Cm, pref, is_seed, is_active, par)
-    _, (p2, m2) = jax.lax.scan(body, (z, z, z, z, z, z), xs)
-    return p2.T, m2.T
+    xs = _blocked((Ap, Bp, Cp, Am, Bm, Cm, pref, is_seed, is_active, par), K)
+    _, (p2, m2) = jax.lax.scan(block, (z, z, z, z, z, z), xs)
+    return p2.reshape(-1, M)[:L1].T, m2.reshape(-1, M)[:L1].T

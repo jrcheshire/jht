@@ -45,6 +45,7 @@ from ._recursion import (
     adjoint_contract_eo,
     adjoint_contract_spin2_ns,
     build_recursion_plan,
+    get_ell_block,
     synth_contract_eo,
     synth_contract_spin2_ns,
 )
@@ -202,10 +203,12 @@ def _opaque(fn):
 
 
 @lru_cache(maxsize=None)
-def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _Prepared:
-    # ``fft_mode`` is part of the cache key: :func:`synthesis` / :func:`adjoint_synthesis`
-    # read the process-global azimuth mode and forward it here, so flipping the mode
-    # compiles a fresh kernel (both variants coexist) rather than silently returning a
+def _prepare(
+    nside: int, lmax: int, spin: int, fft_mode: str = "unrolled", ell_block: int | str = "auto"
+) -> _Prepared:
+    # ``fft_mode`` and ``ell_block`` are part of the cache key: :func:`synthesis` /
+    # :func:`adjoint_synthesis` read the process-global azimuth mode / l-block and forward
+    # them here, so flipping one compiles a fresh kernel (both variants coexist) rather than silently returning a
     # stale one.  Do NOT read the global inside this cached body -- that is the
     # ``jax_enable_x64`` hazard below (a global read here is invisible to the key).
     if spin not in (0, 2):
@@ -302,7 +305,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
 
         @jax.jit
         def synth(alm):
-            Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm))
+            Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm), ell_block)
             G = build_full(Ftot, Fsig) * phase_table()  # (M, nrings)
             cols = [jnp.real(cap_synth(cap_plan, G, G))] if looped else []
             for g in azimuth_groups:
@@ -327,7 +330,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
                 cols.append((fr[:, g.g_plus] * ph).T)  # (M, n_g)
             V = jnp.concatenate(cols, axis=1)[:, ring_to_col]  # (M, nrings), one gather
             Vn, Vs = fold_south(V)
-            return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs))
+            return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs, ell_block))
 
         return _Prepared(_opaque(synth), _opaque(adj))
 
@@ -339,7 +342,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         aE = tri_to_dense(alm2d[0])
         aB = tri_to_dense(alm2d[1])
         FpN, FpS, FmN, FmS = synth_contract_spin2_ns(
-            plan_p, plan_m, x_half, -(aE + 1j * aB), -(aE - 1j * aB)
+            plan_p, plan_m, x_half, -(aE + 1j * aB), -(aE - 1j * aB), ell_block
         )
         phase = phase_table()
         Fp = build_full(FpN, FpS) * phase
@@ -376,7 +379,7 @@ def _prepare(nside: int, lmax: int, spin: int, fft_mode: str = "unrolled") -> _P
         Vm = jnp.concatenate(colsm, axis=1)[:, ring_to_col]
         Vpn, Sp = fold_south(Vp)
         Vmn, Sm = fold_south(Vm)
-        p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm)
+        p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm, ell_block)
         aE = 0.5 * (-p2 - m2)
         aB = 0.5 * (1j * p2 - 1j * m2)
         return jnp.stack([dense_to_tri(aE), dense_to_tri(aB)])
@@ -411,7 +414,7 @@ def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
             f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
             "(a wrong-size alm would otherwise be silently clamped by the gather)"
         )
-    return _prepare(nside, lmax, spin, get_azimuth_fft_mode()).synth(alm)
+    return _prepare(nside, lmax, spin, get_azimuth_fft_mode(), get_ell_block()).synth(alm)
 
 
 def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
@@ -436,4 +439,4 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
             f"map shape {m.shape} != expected {expect} for nside={nside}, spin={spin} "
             "(a wrong-size map would otherwise be silently clamped by the gather)"
         )
-    return _prepare(nside, lmax, spin, get_azimuth_fft_mode()).adj(m)
+    return _prepare(nside, lmax, spin, get_azimuth_fft_mode(), get_ell_block()).adj(m)
