@@ -50,8 +50,12 @@ def _program(kind, nside, lmax, spin, grad):
     return jax.jit(f)
 
 
+HAS_BLOCK = hasattr(jht, "set_ell_block")  # False on jht < 0.6 (per-row contraction)
+
+
 def bench_point(kind, nside, lmax, spin, batch, block, grad, reps, rng):
-    jht.set_ell_block(block)
+    if HAS_BLOCK:
+        jht.set_ell_block(block)
     a = _alm(rng, lmax, spin, batch)
     x = a if kind == "synth" else jax.vmap(lambda z: jht.synthesis(z, nside, lmax, spin))(a)
     fn = _program(kind, nside, lmax, spin, grad)
@@ -73,7 +77,10 @@ def bench_point(kind, nside, lmax, spin, batch, block, grad, reps, rng):
         spin=spin,
         batch=batch,
         block=block,
-        K=jht._recursion.resolve_ell_block(block, lmax + 1, 2 * nside, 1 if spin == 0 else 2),
+        K=jht._recursion.resolve_ell_block(block, lmax + 1, 2 * nside, 1 if spin == 0 else 2)
+        if HAS_BLOCK
+        else 0,
+        jht_version=jht.__version__,
         steady_ms=1e3 * min(ts),
         per_map_ms=1e3 * min(ts) / batch,
         compile_s=compile_s,
@@ -96,7 +103,13 @@ def main():
     args = ap.parse_args()
     blocks = [b if b == "auto" else int(b) for b in args.blocks]
     rng = np.random.default_rng(0)
-    print(f"jht bench_contract: jax {jax.__version__}, device {jax.devices()[0].device_kind}", flush=True)
+    print(
+        f"jht {jht.__version__} bench_contract: jax {jax.__version__}, "
+        f"device {jax.devices()[0].device_kind} (K=0: per-row contraction, jht < 0.6)",
+        flush=True,
+    )
+    if not HAS_BLOCK:
+        blocks = blocks[:1]
     hdr = f"{'kind':>10} {'spin':>4} {'batch':>5} {'K':>4} {'steady_ms':>10} {'per_map_ms':>10} {'compile_s':>9} {'mem_GB':>7}"
     print(hdr)
     print("-" * len(hdr), flush=True)
