@@ -54,8 +54,8 @@ def test_setter_validation(restore_block):
 def test_auto_rule():
     assert R.resolve_ell_block("auto", 41, 21) == 32  # small problem -> cap
     assert R.resolve_ell_block(5, 41, 21) == 5
-    # nside 2048 / lmax 3000 spin 2: 2 stacks of 3001 x 4096 doubles -> budget-limited
-    assert R.resolve_ell_block("auto", 3001, 4096, 2) == 2
+    # nside 2048 / lmax 3000 spin 2: 2 stacks of 1501 folded rows x 4096 doubles
+    assert R.resolve_ell_block("auto", 1501, 4096, 2) == 5
     assert R.resolve_ell_block("auto", 10**5, 10**5) == 1  # never below 1
 
 
@@ -158,3 +158,25 @@ def test_block_is_part_of_cache_key(restore_block):
     p1 = healpix._prepare(NSIDE, TLMAX, 0, "unrolled", 1)
     p3 = healpix._prepare(NSIDE, TLMAX, 0, "unrolled", 3)
     assert p1 is not p3
+
+
+@pytest.mark.parametrize("lmax", [0, 1, 2, 12, 13, 40, 41])
+@pytest.mark.parametrize("abs_spin", [0, 1, 2, 3])
+def test_fold_covers_triangle_once(lmax, abs_spin):
+    """Triangle folding visits every active (l, m) exactly once, in ceil(M/2) rows."""
+    f = R._fold_np(lmax, abs_spin)
+    M = lmax + 1
+    lmin = np.maximum(np.arange(M), abs_spin)
+    want = {(m, ell) for m in range(M) for ell in range(lmin[m], M)}
+    got = list(zip(f.m[f.active].tolist(), f.ell[f.active].tolist()))
+    assert len(got) == len(set(got)) and set(got) == want
+    assert f.R == (M + 1) // 2
+    assert f.S <= lmax + 2 or not want
+    # seeds: exactly one per order, at l = lmin(m)
+    seeds = sorted(zip(f.m[f.seed].tolist(), f.ell[f.seed].tolist()))
+    assert seeds == sorted((m, int(lmin[m])) for m in range(M) if lmin[m] <= lmax)
+    # each row's cells run l-ascending within a phase, A before B
+    for r in range(f.R):
+        act = f.active[:, r]
+        ph = f.phase_b[:, r][act]
+        assert np.all(np.diff(ph.astype(int)) >= 0)

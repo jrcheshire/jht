@@ -463,10 +463,11 @@ def _rec_step(p, q, s, A_c, B_c, C_c, is_seed_c, is_active_c, x, seed_sign, seed
 # Contracting one l-row at a time streams the whole (batch, M, T) accumulator (or,
 # for the adjoint, the batched data) through memory once per l, which is
 # bandwidth-bound.  Every contraction below instead runs the unchanged per-l
-# recursion over a block of K rows (an inner ``lax.scan`` emitting a (K, M, T)
-# lambda stack) and contracts the block as one batched-over-m matrix product.
-# lambda is bitwise unchanged; only the order of the l-sum differs.  Peak extra
-# memory is the lambda stack, O(K.M.T), never the full (L, M, T) table.
+# recursion over a block of K steps (an inner ``lax.scan`` emitting a (K, R, T)
+# lambda stack over the R folded rows, see "Triangle folding") and contracts the
+# block as one batched-over-rows matrix product.  lambda is bitwise unchanged; only
+# the order of the l-sum differs.  Peak extra memory is the lambda stack, O(K.R.T),
+# never the full (L, M, T) table.
 # --------------------------------------------------------------------------- #
 _ELL_BLOCK: int | str = "auto"
 _ELL_BLOCK_MAX = 32
@@ -476,12 +477,12 @@ _ELL_BLOCK_BUDGET_BYTES = 512 * 2**20  # lambda-stack budget for the "auto" rule
 def set_ell_block(k: int | str) -> None:
     """Set the l-block size ``K`` of the Legendre contraction for subsequent transforms.
 
-    ``"auto"`` (default) picks ``K = clamp(budget // (n_stacks * M * T * 8), 1, 32)``
-    with a 512 MiB budget for the per-block lambda stack(s): ``K = 32`` up to
-    nside ~ 512 and smaller at high nside.  An integer ``k >= 1`` pins it; ``k = 1``
+    ``"auto"`` (default) picks ``K = clamp(budget // (n_stacks * R * T * 8), 1, 32)``
+    (``R = ceil((lmax+1)/2)`` folded rows, ``T`` colatitudes) with a 512 MiB budget for
+    the per-block lambda stack(s): ``K = 32`` to beyond nside 512, smaller at high nside.  An integer ``k >= 1`` pins it; ``k = 1``
     contracts one l-row at a time.  Results agree to rounding for every ``K``; the
     choice trades memory (O(K M T) per stack) for fewer passes over the
-    accumulators, which matters for batched (``vmap``) transforms on GPU.
+    accumulators, which matters for batched (``vmap``) transforms.
 
     Process-global, like :func:`jht.set_azimuth_fft_mode`; it is part of the
     transform cache key, so changing it compiles fresh kernels.
@@ -497,10 +498,10 @@ def get_ell_block() -> int | str:
     return _ELL_BLOCK
 
 
-def resolve_ell_block(setting: int | str, M: int, T: int, n_stacks: int = 1) -> int:
-    """Block size ``K`` for an ``(M, T)`` recursion with ``n_stacks`` lambda stacks."""
+def resolve_ell_block(setting: int | str, rows: int, T: int, n_stacks: int = 1) -> int:
+    """Block size ``K`` for a ``(rows, T)`` recursion with ``n_stacks`` lambda stacks."""
     if setting == "auto":
-        k = _ELL_BLOCK_BUDGET_BYTES // max(1, n_stacks * M * T * 8)
+        k = _ELL_BLOCK_BUDGET_BYTES // max(1, n_stacks * rows * T * 8)
         return int(min(_ELL_BLOCK_MAX, max(1, k)))
     return int(setting)
 
@@ -543,29 +544,151 @@ def _adj_gemm(lam, V):
     return jax.lax.complex(out[:S], out[S:])
 
 
-def _parity(lmax: int):
-    return jnp.asarray(np.where(np.arange(lmax + 1) % 2 == 0, 1.0, -1.0))
+# --------------------------------------------------------------------------- #
+# Triangle folding.
+#
+# Order m is active only for l >= lmin(m) = max(m, |spin|), so a rectangular (l, m)
+# sweep spends about half its work on inactive rows.  Row r of the folded sweep runs
+# order m_A = r from its seed to lmax, then restarts at the seed of its partner
+# m_B = M-1-r (when m_B > m_A) and runs that to lmax: ~lmax+2 steps over ceil(M/2)
+# rows instead of lmax+1 steps over M rows.  Every per-(l, m) table is gathered into
+# the (step, row) layout; the per-step arithmetic is the unchanged _rec_step, so each
+# lambda value is bitwise the same as the rectangular sweep's.  Contractions keep
+# separate A / B outputs per row (phase-masked coefficients or data) and unfold at
+# the end.
+# --------------------------------------------------------------------------- #
+class _Fold(NamedTuple):
+    """Static (step, row) layout of the folded sweep for one (lmax, |spin|)."""
+
+    R: int  # rows = ceil(M / 2)
+    S: int  # steps
+    n_b: int  # rows with a partner (m_B > m_A) = M - R
+    ell: np.ndarray  # (S, R) l of each cell (0 when inactive)
+    m: np.ndarray  # (S, R) m of each cell (0 when inactive)
+    active: np.ndarray  # (S, R) bool
+    seed: np.ndarray  # (S, R) bool, l == lmin(m)
+    phase_b: np.ndarray  # (S, R) bool, the cell belongs to the partner m_B
+    m_a: np.ndarray  # (R,)
+    m_b: np.ndarray  # (R,) partner order (== m_a when there is none)
+    inv: np.ndarray  # (M * (lmax+1),) dense (m, l) -> flat step*R + row; S*R = zero slot
 
 
-def _one_state_step(x, seed_sign, seed_log):
+@lru_cache(maxsize=None)
+def _fold_np(lmax: int, abs_spin: int) -> _Fold:
+    M = L1 = lmax + 1
+    lmin = np.maximum(np.arange(M), abs_spin)
+    n = np.clip(L1 - lmin, 0, None)  # active steps of each order
+    R = (M + 1) // 2
+    m_a = np.arange(R)
+    m_b = M - 1 - m_a
+    has_b = m_b > m_a
+    m_b = np.where(has_b, m_b, m_a)
+    S = max(1, int(np.max(n[m_a] + np.where(has_b, n[m_b], 0))))
+    j = np.arange(S)[:, None]
+    in_a = j < n[m_a][None, :]
+    in_b = has_b[None, :] & ~in_a & (j < (n[m_a] + n[m_b])[None, :])
+    active = in_a | in_b
+    m = np.where(in_a, m_a[None, :], np.where(in_b, m_b[None, :], 0))
+    ell = np.where(
+        in_a,
+        lmin[m_a][None, :] + j,
+        np.where(in_b, lmin[m_b][None, :] + j - n[m_a][None, :], 0),
+    )
+    seed = active & (ell == lmin[m])
+    inv = np.full(M * L1, S * R, dtype=np.int64)
+    jj, rr = np.nonzero(active)
+    inv[m[jj, rr] * L1 + ell[jj, rr]] = jj * R + rr
+    out = _Fold(R, S, int(has_b.sum()), ell, m, active, seed, in_b, m_a, m_b, inv)
+    for a in (ell, m, active, seed, in_b, m_a, m_b, inv):
+        a.setflags(write=False)
+    return out
+
+
+def _fold_tables(plan: RecursionPlan, fold: _Fold):
+    """Recursion tables of ``plan`` gathered into the folded (step, row) layout.
+
+    Returns ``(A, B, C, pref, seed_sign_a, seed_sign_b, seed_log_a, seed_log_b)`` with the
+    per-cell grids ``(S, R)`` and the per-row seeds ``(R,)`` / ``(R, T)`` for orders
+    m_A and m_B.
+    """
+    A, B, C, pref, seed_sign, seed_log, _is, _ia = _plan_arrays(plan)
+    ell, m = fold.ell, fold.m
+    return (
+        A[ell, m],
+        B[ell, m],
+        C[ell, m],
+        pref[ell, m],
+        seed_sign[fold.m_a],
+        seed_sign[fold.m_b],
+        seed_log[fold.m_a],
+        seed_log[fold.m_b],
+    )
+
+
+def _fold_coef(fold: _Fold, dense):
+    """Dense ``(M, lmax+1)`` coefficients -> ``(S, R)`` in the folded layout (0 off-mask)."""
+    return jnp.where(fold.active, jnp.asarray(dense)[fold.m, fold.ell], 0.0)
+
+
+def _unfold_rows(fold: _Fold, Fa, Fb):
+    """Per-row A / B outputs ``(R, ...)`` -> ``(M, ...)`` in m order."""
+    return jnp.concatenate([Fa, Fb[: fold.n_b][::-1]], axis=0)
+
+
+def _unfold_cells(fold: _Fold, b_folded, lmax: int):
+    """Folded per-cell outputs ``(S', R)`` (``S' >= S``) -> dense ``(M, lmax+1)``.
+
+    A gather through the static inverse map (never a scatter); off-mask entries read
+    the appended zero.
+    """
+    flat = b_folded[: fold.S].reshape(-1)
+    flat = jnp.concatenate([flat, jnp.zeros((1,), flat.dtype)])
+    return flat[fold.inv].reshape(lmax + 1, lmax + 1)
+
+
+def _parity_cells(fold: _Fold):
+    return jnp.asarray(np.where(fold.ell % 2 == 0, 1.0, -1.0))
+
+
+def _sel(phb, b, a):
+    """Per-cell select of the B / A contraction output (``phb``: (K, R))."""
+    return jnp.where(phb, b, a)
+
+
+def _one_state_step(x, ss_a, ss_b, sl_a, sl_b):
     def step(carry, xs):
         p, q, s = carry
-        A_c, B_c, C_c, seed_c, act_c = xs
-        p, q, s, lam = _rec_step(p, q, s, A_c, B_c, C_c, seed_c, act_c, x, seed_sign, seed_log)
+        A_c, B_c, C_c, seed_c, act_c, phb_c = xs
+        ss = jnp.where(phb_c, ss_b, ss_a)
+        sl = jnp.where(phb_c[:, None], sl_b, sl_a)
+        p, q, s, lam = _rec_step(p, q, s, A_c, B_c, C_c, seed_c, act_c, x, ss, sl)
         return (p, q, s), lam
 
     return step
 
 
-def _two_state_step(x, ssp, slp, ssm, slm):
+def _two_state_step(x, seeds_p, seeds_m):
+    ssp_a, ssp_b, slp_a, slp_b = seeds_p
+    ssm_a, ssm_b, slm_a, slm_b = seeds_m
+
     def step(carry, xs):
         pp, qp, sp, pm, qm, sm = carry
-        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, sd_c, ac_c = xs
+        Ap_c, Bp_c, Cp_c, Am_c, Bm_c, Cm_c, sd_c, ac_c, phb_c = xs
+        pb = phb_c[:, None]
+        ssp = jnp.where(phb_c, ssp_b, ssp_a)
+        ssm = jnp.where(phb_c, ssm_b, ssm_a)
+        slp = jnp.where(pb, slp_b, slp_a)
+        slm = jnp.where(pb, slm_b, slm_a)
         pp, qp, sp, lam_p = _rec_step(pp, qp, sp, Ap_c, Bp_c, Cp_c, sd_c, ac_c, x, ssp, slp)
         pm, qm, sm, lam_m = _rec_step(pm, qm, sm, Am_c, Bm_c, Cm_c, sd_c, ac_c, x, ssm, slm)
         return (pp, qp, sp, pm, qm, sm), (lam_p, lam_m)
 
     return step
+
+
+def _ab(c, phb):
+    """Split folded coefficients ``(K, R)`` into phase-A and phase-B parts."""
+    return jnp.where(phb, 0.0, c), jnp.where(phb, c, 0.0)
 
 
 def synth_contract(plan: RecursionPlan, x, alm_dense, ell_block: int | str = "auto") -> jax.Array:
@@ -576,23 +699,25 @@ def synth_contract(plan: RecursionPlan, x, alm_dense, ell_block: int | str = "au
     the per-m ring coefficients before the phi-FFT.  ``ell_block``: see
     :func:`set_ell_block`.
     """
-    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    fold = _fold_np(plan.lmax, abs(plan.spin))
+    A, B, C, pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
     x = jnp.asarray(x)
-    M, T = seed_log.shape
-    K = resolve_ell_block(ell_block, M, T, 1)
-    coef = jnp.asarray(alm_dense).T * pref  # (L1, M)
-    step = _one_state_step(x, seed_sign, seed_log)
+    R, T = fold.R, x.shape[0]
+    K = resolve_ell_block(ell_block, R, T, 1)
+    coef = _fold_coef(fold, alm_dense) * pref
+    step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
 
     def block(carry, xs):
         rec, F = carry
-        A_k, B_k, C_k, c_k, sd_k, ac_k = xs
-        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
-        return (rec, F + _synth_gemm(c_k[None], lam)[0]), None
+        A_k, B_k, C_k, c_k, sd_k, ac_k, pb_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k, pb_k))
+        return (rec, F + _synth_gemm(jnp.stack(_ab(c_k, pb_k)), lam)), None
 
-    z = jnp.zeros((M, T), dtype=jnp.float64)
-    init = ((z, z, z), jnp.zeros((M, T), dtype=jnp.complex128))
-    (_, F), _ = jax.lax.scan(block, init, _blocked((A, B, C, coef, is_seed, is_active), K))
-    return F
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    init = ((z, z, z), jnp.zeros((2, R, T), dtype=jnp.complex128))
+    xs = _blocked((A, B, C, coef, fold.seed, fold.active, fold.phase_b), K)
+    (_, F), _ = jax.lax.scan(block, init, xs)
+    return _unfold_rows(fold, F[0], F[1])
 
 
 def adjoint_contract(plan: RecursionPlan, x, V, ell_block: int | str = "auto") -> jax.Array:
@@ -603,22 +728,25 @@ def adjoint_contract(plan: RecursionPlan, x, V, ell_block: int | str = "auto") -
     This is the l-contraction of the exact adjoint; the FFT side lives in
     ``healpix.py``.  ``ell_block``: see :func:`set_ell_block`.
     """
-    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    fold = _fold_np(plan.lmax, abs(plan.spin))
+    A, B, C, pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
     x = jnp.asarray(x)
     V = jnp.asarray(V)
-    M, T = seed_log.shape
-    L1 = plan.lmax + 1
-    K = resolve_ell_block(ell_block, M, T, 1)
-    step = _one_state_step(x, seed_sign, seed_log)
+    R, T = fold.R, x.shape[0]
+    K = resolve_ell_block(ell_block, R, T, 1)
+    Vab = jnp.stack([V[fold.m_a], V[fold.m_b]])  # (2, R, T)
+    step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
 
     def block(rec, xs):
-        A_k, B_k, C_k, pref_k, sd_k, ac_k = xs
-        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
-        return rec, pref_k * _adj_gemm(lam, V[None])[0]  # (K, M)
+        A_k, B_k, C_k, pref_k, sd_k, ac_k, pb_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k, pb_k))
+        g = _adj_gemm(lam, Vab)  # (2, K, R)
+        return rec, pref_k * _sel(pb_k, g[1], g[0])
 
-    z = jnp.zeros((M, T), dtype=jnp.float64)
-    _, b = jax.lax.scan(block, (z, z, z), _blocked((A, B, C, pref, is_seed, is_active), K))
-    return b.reshape(-1, M)[:L1].T
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    xs = _blocked((A, B, C, pref, fold.seed, fold.active, fold.phase_b), K)
+    _, b = jax.lax.scan(block, (z, z, z), xs)
+    return _unfold_cells(fold, b.reshape(-1, R), plan.lmax)
 
 
 # --------------------------------------------------------------------------- #
@@ -643,25 +771,26 @@ def synth_contract_eo(plan: RecursionPlan, x, alm_dense, ell_block: int | str = 
     over the (north-half) colatitudes ``x``.  The caller forms
     ``F_north = F_total`` and ``F_south = (-1)^m F_signed``.
     """
-    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    fold = _fold_np(plan.lmax, abs(plan.spin))
+    A, B, C, pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
     x = jnp.asarray(x)
-    M, T = seed_log.shape
-    K = resolve_ell_block(ell_block, M, T, 1)
-    coef = jnp.asarray(alm_dense).T * pref  # (L1, M)
-    par = _parity(plan.lmax)
-    step = _one_state_step(x, seed_sign, seed_log)
+    R, T = fold.R, x.shape[0]
+    K = resolve_ell_block(ell_block, R, T, 1)
+    coef = _fold_coef(fold, alm_dense) * pref
+    step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
 
     def block(carry, xs):
         rec, F = carry
-        A_k, B_k, C_k, c_k, sd_k, ac_k, par_k = xs
-        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
-        return (rec, F + _synth_gemm(jnp.stack([c_k, par_k[:, None] * c_k]), lam)), None
+        A_k, B_k, C_k, c_k, sd_k, ac_k, pb_k, par_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k, pb_k))
+        ca, cb = _ab(c_k, pb_k)
+        return (rec, F + _synth_gemm(jnp.stack([ca, par_k * ca, cb, par_k * cb]), lam)), None
 
-    z = jnp.zeros((M, T), dtype=jnp.float64)
-    init = ((z, z, z), jnp.zeros((2, M, T), dtype=jnp.complex128))
-    xs = _blocked((A, B, C, coef, is_seed, is_active, par), K)
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    init = ((z, z, z), jnp.zeros((4, R, T), dtype=jnp.complex128))
+    xs = _blocked((A, B, C, coef, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)), K)
     (_, F), _ = jax.lax.scan(block, init, xs)
-    return F[0], F[1]
+    return _unfold_rows(fold, F[0], F[2]), _unfold_rows(fold, F[1], F[3])
 
 
 def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs, ell_block: int | str = "auto"):
@@ -671,37 +800,36 @@ def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs, ell_block: int | str = "
     south data with the m-parity folded in; equator column zero).  Returns the
     dense ``(M, lmax+1)`` coefficients.
     """
-    A, B, C, pref, seed_sign, seed_log, is_seed, is_active = _plan_arrays(plan)
+    fold = _fold_np(plan.lmax, abs(plan.spin))
+    A, B, C, pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
     x = jnp.asarray(x)
-    V = jnp.stack([jnp.asarray(Vn), jnp.asarray(Vs)])  # (2, M, T)
-    M, T = seed_log.shape
-    L1 = plan.lmax + 1
-    K = resolve_ell_block(ell_block, M, T, 1)
-    par = _parity(plan.lmax)
-    step = _one_state_step(x, seed_sign, seed_log)
+    Vn, Vs = jnp.asarray(Vn), jnp.asarray(Vs)
+    R, T = fold.R, x.shape[0]
+    K = resolve_ell_block(ell_block, R, T, 1)
+    V = jnp.stack([Vn[fold.m_a], Vs[fold.m_a], Vn[fold.m_b], Vs[fold.m_b]])  # (4, R, T)
+    step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
 
     def block(rec, xs):
-        A_k, B_k, C_k, pref_k, sd_k, ac_k, par_k = xs
-        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k))
-        g = _adj_gemm(lam, V)  # (2, K, M)
-        return rec, pref_k * (g[0] + par_k[:, None] * g[1])
+        A_k, B_k, C_k, pref_k, sd_k, ac_k, pb_k, par_k = xs
+        rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k, pb_k))
+        g = _adj_gemm(lam, V)  # (4, K, R)
+        return rec, pref_k * _sel(pb_k, g[2] + par_k * g[3], g[0] + par_k * g[1])
 
-    z = jnp.zeros((M, T), dtype=jnp.float64)
-    xs = _blocked((A, B, C, pref, is_seed, is_active, par), K)
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    xs = _blocked((A, B, C, pref, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)), K)
     _, b = jax.lax.scan(block, (z, z, z), xs)
-    return b.reshape(-1, M)[:L1].T
+    return _unfold_cells(fold, b.reshape(-1, R), plan.lmax)
 
 
-def _two_state_arrays(plan_p: RecursionPlan, plan_m: RecursionPlan, x):
-    """jnp arrays to drive the d^{+2} and d^{-2} recursions together over the half grid.
+def _two_state_arrays(plan_p: RecursionPlan, plan_m: RecursionPlan, fold: _Fold):
+    """Folded tables to drive the d^{+2} and d^{-2} recursions together over the half grid.
 
-    ``plan_p`` / ``plan_m`` share ``pref / is_seed / is_active`` (same |spin|) and
-    differ only in the recurrence coeffs and the seed.
+    ``plan_p`` / ``plan_m`` share ``pref`` and the active / seed masks (same |spin|) and
+    differ only in the recurrence coeffs and the seeds.
     """
-    Ap, Bp, Cp, pref, ssp, slp, is_seed, is_active = _plan_arrays(plan_p)
-    Am, Bm, Cm, _pf, ssm, slm, _is, _ia = _plan_arrays(plan_m)
-    par = _parity(plan_p.lmax)
-    return Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, jnp.asarray(x)
+    Ap, Bp, Cp, pref, *seeds_p = _fold_tables(plan_p, fold)
+    Am, Bm, Cm, _pf, *seeds_m = _fold_tables(plan_m, fold)
+    return Ap, Bp, Cp, Am, Bm, Cm, pref, tuple(seeds_p), tuple(seeds_m)
 
 
 def synth_contract_spin2_ns(plan_p, plan_m, x, bp_dense, bm_dense, ell_block: int | str = "auto"):
@@ -711,32 +839,38 @@ def synth_contract_spin2_ns(plan_p, plan_m, x, bp_dense, bm_dense, ell_block: in
     south halves still carry the ``(-1)^m`` factor for the caller to apply.  The
     south of each channel uses the *other* spin's column.
     """
-    Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, x = (
-        _two_state_arrays(plan_p, plan_m, x)
-    )
-    M, T = slp.shape
-    K = resolve_ell_block(ell_block, M, T, 2)
-    cp = jnp.asarray(bp_dense).T * pref  # (L1, M)
-    cm = jnp.asarray(bm_dense).T * pref
-    step = _two_state_step(x, ssp, slp, ssm, slm)
+    fold = _fold_np(plan_p.lmax, abs(plan_p.spin))
+    Ap, Bp, Cp, Am, Bm, Cm, pref, seeds_p, seeds_m = _two_state_arrays(plan_p, plan_m, fold)
+    x = jnp.asarray(x)
+    R, T = fold.R, x.shape[0]
+    K = resolve_ell_block(ell_block, R, T, 2)
+    cp = _fold_coef(fold, bp_dense) * pref
+    cm = _fold_coef(fold, bm_dense) * pref
+    step = _two_state_step(x, seeds_p, seeds_m)
 
     def block(carry, xs):
-        rec, Fp, Fm = carry  # Fp = (FpN, FmS) from lambda_+, Fm = (FmN, FpS) from lambda_-
-        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, cp_k, cm_k, sd_k, ac_k, par_k = xs
+        rec, Fp, Fm = carry  # Fp: (FpN, FmS) A/B from lambda_+; Fm: (FmN, FpS) A/B from lambda_-
+        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, cp_k, cm_k, sd_k, ac_k, pb_k, par_k = xs
         rec, (lam_p, lam_m) = jax.lax.scan(
-            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k)
+            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k, pb_k)
         )
-        pk = par_k[:, None]
-        Fp = Fp + _synth_gemm(jnp.stack([cp_k, pk * cm_k]), lam_p)
-        Fm = Fm + _synth_gemm(jnp.stack([cm_k, pk * cp_k]), lam_m)
+        cpa, cpb = _ab(cp_k, pb_k)
+        cma, cmb = _ab(cm_k, pb_k)
+        Fp = Fp + _synth_gemm(jnp.stack([cpa, par_k * cma, cpb, par_k * cmb]), lam_p)
+        Fm = Fm + _synth_gemm(jnp.stack([cma, par_k * cpa, cmb, par_k * cpb]), lam_m)
         return (rec, Fp, Fm), None
 
-    z = jnp.zeros((M, T), dtype=jnp.float64)
-    zc = jnp.zeros((2, M, T), dtype=jnp.complex128)
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    zc = jnp.zeros((4, R, T), dtype=jnp.complex128)
     init = ((z, z, z, z, z, z), zc, zc)
-    xs = _blocked((Ap, Bp, Cp, Am, Bm, Cm, cp, cm, is_seed, is_active, par), K)
+    xs = _blocked(
+        (Ap, Bp, Cp, Am, Bm, Cm, cp, cm, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)),
+        K,
+    )
     (_, Fp, Fm), _ = jax.lax.scan(block, init, xs)
-    return Fp[0], Fm[1], Fm[0], Fp[1]
+    FpN, FmS = _unfold_rows(fold, Fp[0], Fp[2]), _unfold_rows(fold, Fp[1], Fp[3])
+    FmN, FpS = _unfold_rows(fold, Fm[0], Fm[2]), _unfold_rows(fold, Fm[1], Fm[3])
+    return FpN, FpS, FmN, FmS
 
 
 def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm, ell_block: int | str = "auto"):
@@ -747,27 +881,36 @@ def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm, ell_block: in
     ``p2`` contracts the +2 column with the north + the -2 column with the south;
     ``m2`` the mirror.
     """
-    Ap, Bp, Cp, Am, Bm, Cm, pref, ssp, slp, ssm, slm, is_seed, is_active, par, x = (
-        _two_state_arrays(plan_p, plan_m, x)
-    )
-    M, T = slp.shape
-    L1 = plan_p.lmax + 1
-    K = resolve_ell_block(ell_block, M, T, 2)
-    Vp = jnp.stack([jnp.asarray(Vpn), jnp.asarray(Sm)])  # contracted with lambda_+
-    Vm = jnp.stack([jnp.asarray(Vmn), jnp.asarray(Sp)])  # contracted with lambda_-
-    step = _two_state_step(x, ssp, slp, ssm, slm)
+    fold = _fold_np(plan_p.lmax, abs(plan_p.spin))
+    Ap, Bp, Cp, Am, Bm, Cm, pref, seeds_p, seeds_m = _two_state_arrays(plan_p, plan_m, fold)
+    x = jnp.asarray(x)
+    R, T = fold.R, x.shape[0]
+    K = resolve_ell_block(ell_block, R, T, 2)
+    Vpn, Sp, Vmn, Sm = (jnp.asarray(a) for a in (Vpn, Sp, Vmn, Sm))
+    ma, mb = fold.m_a, fold.m_b
+    Vp = jnp.stack([Vpn[ma], Sm[ma], Vpn[mb], Sm[mb]])  # contracted with lambda_+
+    Vm = jnp.stack([Vmn[ma], Sp[ma], Vmn[mb], Sp[mb]])  # contracted with lambda_-
+    step = _two_state_step(x, seeds_p, seeds_m)
 
     def block(rec, xs):
-        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, pref_k, sd_k, ac_k, par_k = xs
+        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, pref_k, sd_k, ac_k, pb_k, par_k = xs
         rec, (lam_p, lam_m) = jax.lax.scan(
-            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k)
+            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k, pb_k)
         )
-        gp = _adj_gemm(lam_p, Vp)  # (2, K, M): [lam_+ . Vpn, lam_+ . Sm]
-        gm = _adj_gemm(lam_m, Vm)  # (2, K, M): [lam_- . Vmn, lam_- . Sp]
-        pk = par_k[:, None]
-        return rec, (pref_k * (gp[0] + pk * gm[1]), pref_k * (gm[0] + pk * gp[1]))
+        gp = _adj_gemm(lam_p, Vp)  # (4, K, R): lam_+ . [Vpn_A, Sm_A, Vpn_B, Sm_B]
+        gm = _adj_gemm(lam_m, Vm)  # (4, K, R): lam_- . [Vmn_A, Sp_A, Vmn_B, Sp_B]
+        p2 = _sel(pb_k, gp[2] + par_k * gm[3], gp[0] + par_k * gm[1])
+        m2 = _sel(pb_k, gm[2] + par_k * gp[3], gm[0] + par_k * gp[1])
+        return rec, (pref_k * p2, pref_k * m2)
 
-    z = jnp.zeros((M, T), dtype=jnp.float64)
-    xs = _blocked((Ap, Bp, Cp, Am, Bm, Cm, pref, is_seed, is_active, par), K)
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    xs = _blocked(
+        (Ap, Bp, Cp, Am, Bm, Cm, pref, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)),
+        K,
+    )
     _, (p2, m2) = jax.lax.scan(block, (z, z, z, z, z, z), xs)
-    return p2.reshape(-1, M)[:L1].T, m2.reshape(-1, M)[:L1].T
+    lmax = plan_p.lmax
+    return (
+        _unfold_cells(fold, p2.reshape(-1, R), lmax),
+        _unfold_cells(fold, m2.reshape(-1, R), lmax),
+    )

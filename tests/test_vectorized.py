@@ -67,8 +67,8 @@ def _rand_alm(lmax, rng, lmin=0):
 # --------------------------------------------------------------------------- #
 # the fused all-m recursion engine vs the per-m reference
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("spin", [0, 2, -2])
-@pytest.mark.parametrize("lmax", [12, 64])
+@pytest.mark.parametrize("spin", [0, 1, -1, 2, -2, 3, -3])
+@pytest.mark.parametrize("lmax", [12, 13, 64])  # odd and even M = lmax + 1 (triangle folding)
 def test_synth_contract_matches_per_m(spin, lmax):
     rng = np.random.default_rng(spin + lmax)
     theta = np.linspace(0.01, np.pi - 0.01, 31)
@@ -81,8 +81,8 @@ def test_synth_contract_matches_per_m(spin, lmax):
     assert np.max(np.abs(F - F_ref)) / max(np.max(np.abs(F_ref)), 1e-300) <= TOL
 
 
-@pytest.mark.parametrize("spin", [0, 2, -2])
-@pytest.mark.parametrize("lmax", [12, 64])
+@pytest.mark.parametrize("spin", [0, 1, -1, 2, -2, 3, -3])
+@pytest.mark.parametrize("lmax", [12, 13, 64])  # odd and even M = lmax + 1 (triangle folding)
 def test_adjoint_contract_matches_per_m(spin, lmax):
     rng = np.random.default_rng(spin + lmax + 1)
     theta = np.linspace(0.01, np.pi - 0.01, 31)
@@ -101,7 +101,7 @@ def test_adjoint_contract_matches_per_m(spin, lmax):
 # --------------------------------------------------------------------------- #
 # the public fast transforms vs the eager reference
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24)])
+@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24), (16, 23)])
 def test_fast_synthesis_matches_reference_spin0(nside, lmax):
     rng = np.random.default_rng(nside)
     alm = _rand_alm(lmax, rng)
@@ -110,7 +110,7 @@ def test_fast_synthesis_matches_reference_spin0(nside, lmax):
     assert np.max(np.abs(fast - ref)) / np.max(np.abs(ref)) <= TOL
 
 
-@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24)])
+@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24), (16, 23)])
 def test_fast_synthesis_matches_reference_spin2(nside, lmax):
     rng = np.random.default_rng(nside + 1)
     aE, aB = _rand_alm(lmax, rng, lmin=2), _rand_alm(lmax, rng, lmin=2)
@@ -120,7 +120,7 @@ def test_fast_synthesis_matches_reference_spin2(nside, lmax):
     assert np.max(np.abs(fast - ref)) / np.max(np.abs(ref)) <= TOL
 
 
-@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24)])
+@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24), (16, 23)])
 def test_fast_adjoint_matches_reference_spin0(nside, lmax):
     rng = np.random.default_rng(nside + 2)
     v = rng.standard_normal(12 * nside**2)
@@ -129,7 +129,7 @@ def test_fast_adjoint_matches_reference_spin0(nside, lmax):
     assert np.max(np.abs(fast - ref)) / np.max(np.abs(ref)) <= TOL
 
 
-@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24)])
+@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24), (16, 23)])
 def test_fast_adjoint_matches_reference_spin2(nside, lmax):
     rng = np.random.default_rng(nside + 3)
     Q, U = rng.standard_normal(12 * nside**2), rng.standard_normal(12 * nside**2)

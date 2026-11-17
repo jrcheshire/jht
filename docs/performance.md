@@ -12,12 +12,15 @@ gated against the eager reference implementation (`jht._reference`) by
 1. **jit + cached plans.** The public transforms are jit-compiled; geometry, recursion
    plans and index maps are built once per `(nside, lmax, spin)` (`lru_cache` on
    `_prepare`), so `analysis`'s Jacobi iteration reuses one compiled kernel.
-2. **One fused all-m recursion, contracted in ℓ-blocks.** A `lax.scan` vectorizes the
-   recursion over m. It runs in blocks of K ℓ-rows: an inner scan emits a `(K, M, n_θ)`
-   λ stack and the block is contracted with the coefficients (or the ring data, for the
-   adjoint) as one matrix product batched over m. The full λ table is never
-   materialized: peak λ memory is `O(K·M·n_θ)`, not `O(L·M·n_θ)` (≈ 16 GB per component
-   at nside=2048). See "ℓ-block size" below.
+2. **One fused all-m recursion, triangle-folded, contracted in ℓ-blocks.** A `lax.scan`
+   vectorizes the recursion over m. Order m is active only for ℓ ≥ max(m, |s|), so row r
+   of the sweep runs order r and then its partner M−1−r: ≈ lmax+2 steps over ⌈M/2⌉ rows
+   instead of lmax+1 steps over M rows, about half the recursion work. The sweep runs in
+   blocks of K steps: an inner scan emits a `(K, ⌈M/2⌉, n_θ)` λ stack and the block is
+   contracted with the coefficients (or the ring data, for the adjoint) as one matrix
+   product batched over rows. The full λ table is never materialized: peak λ memory is
+   `O(K·M·n_θ)`, not `O(L·M·n_θ)` (≈ 16 GB per component at nside=2048). See "ℓ-block
+   size" below.
 3. **Batched ring FFTs.** The φ-FFTs are batched by ring length: the equatorial belt
    (`2·nside+1` rings) in one FFT, the polar caps by length group.
 4. **Equatorial symmetry.** The recursion runs only on the north half + equator
@@ -69,8 +72,8 @@ Per transform, the dominant live arrays are:
 - recursion carry (the fused scan): `O(M · n_θ)` per recursion state, with
   `n_θ = 2·nside` (north half) and `M = lmax+1`. spin-2 runs two states (±2)
   with a few complex accumulators → ~hundreds of MB at the ceiling, not GB.
-- the per-block λ stack: `K · M · n_θ` float64 per recursion state, capped at 512 MiB
-  by the `"auto"` block size.
+- the per-block λ stack: `K · ⌈M/2⌉ · n_θ` float64 per recursion state, capped at
+  512 MiB by the `"auto"` block size.
 - the per-m ring coefficients `F` / `V`: `O(M · nrings)` complex.
 - the map and the batched belt FFT: `O(npix)`.
 - static plan tables (recurrence coeffs, seeds, index maps): `O(M² + M·n_θ)`,
@@ -89,32 +92,32 @@ nside=2048.
 ## ℓ-block size
 
 `jht.set_ell_block(k)` sets K; `"auto"` (default) takes
-`K = clamp(512 MiB // (n_stacks · M · n_θ · 8 B), 1, 32)`, i.e. K = 32 to nside ≈ 512 and
-smaller above (spin 2 keeps two stacks). K changes only the order of the ℓ-sum (the λ
-rows are identical), so results agree to rounding for every K; `K = 1` contracts one row
-at a time.
+`K = clamp(512 MiB // (n_stacks · ⌈M/2⌉ · n_θ · 8 B), 1, 32)`, i.e. K = 32 to beyond
+nside = 512 and smaller at high nside (spin 2 keeps two stacks). K changes only the order
+of the ℓ-sum (the λ values are identical), so results agree to rounding for every K;
+`K = 1` contracts one step at a time.
 
 The recursion does not depend on the data, so under `vmap` over maps it is computed once
-and shared, while the contraction scales with the batch. With one row at a time the
+and shared, while the contraction scales with the batch. With one step at a time the
 contraction reads and writes the whole batched accumulator (or reads the batched ring
-data) once per ℓ, which is memory-bandwidth bound; a block does that once per K rows.
-A single unbatched transform is recursion-bound and K makes no difference to it.
+data) once per ℓ, which is memory-bandwidth bound; a block does that once per K steps.
 
-`scripts/bench_contract.py` (Apple-silicon CPU, nside=128, lmax=192, steady ms per
-`vmap`-ed call of 80 maps; the 0.5.0 column is the previous per-row contraction):
+`scripts/bench_contract.py`, steady ms per call (`vmap` over 80 maps, or a single map),
+0.5.0 (rectangular per-row sweep) vs the folded, blocked sweep at K = 32:
 
-| transform | 0.5.0 | K = 1 | K = 8 | K = 32 |
-|---|---:|---:|---:|---:|
-| synthesis, spin 0 | 355 | 432 | 272 | 175 |
-| adjoint, spin 0 | 398 | 591 | 161 | 132 |
-| synthesis, spin 2 | 419 | 454 | 379 | 226 |
-| adjoint, spin 2 | 616 | 1157 | 274 | 206 |
+| transform | CPU 1 map | CPU 80 maps | RTX 3050, nside 256, 40 maps |
+|---|---:|---:|---:|
+| synthesis, spin 0 | 28.8 → 21.9 | 355 → 177 | 2397 → 598 |
+| adjoint, spin 0 | 31.3 → 22.7 | 398 → 131 | 1055 → 460 |
+| synthesis, spin 2 | 40.2 → 29.0 | 419 → 224 | 5451 → 1110 |
+| adjoint, spin 2 | 44.9 → 34.3 | 616 → 216 | 2091 → 906 |
 
-Single-map times are unchanged (29.7 / 30.6 / 40.0 / 48.3 ms at K = 1 vs 29.7 / 32.7 /
-42.0 / 45.7 ms at K = 32).
+CPU: Apple-silicon, nside 128, lmax 192. The RTX 3050 column is the blocked sweep before
+folding; that card's fp64 rate is 1/64 of fp32, so it understates the gain on datacenter
+GPUs.
 
-Reverse mode saves the λ rows per block, `(n_blocks, K, M, n_θ)` float64, where the
-per-row contraction saved complex products, so the native-AD tape is half the size.
+Reverse mode saves the λ values per block, `(n_blocks, K, ⌈M/2⌉, n_θ)` float64, where the
+rectangular per-row contraction saved complex `(L, M, n_θ)` products: ~0.3× the bytes.
 
 ## Known costs
 

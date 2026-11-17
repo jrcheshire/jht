@@ -7,14 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-- **The ℓ-contraction runs in blocks of K rows.** The recursion emits a `(K, M, n_θ)` λ
-  stack per block, and the block is contracted as one matrix product batched over m,
-  instead of updating the accumulators once per ℓ. Under `vmap` (where the recursion is
-  shared across the batch) this removes most of the memory traffic of the contraction:
-  2-3x per batched call of 80 maps on CPU at nside 128. Single transforms are unchanged.
-  Results agree with 0.5.0 to rounding. Applies to the on-grid and off-grid transforms.
-  The native-AD tape now holds float64 λ blocks instead of complex products (half the
-  size).
+- **The recursion skips the inactive triangle.** Order m is active only for ℓ ≥
+  max(m, |s|); each row of the sweep now runs order m and then M−1−m, so the recursion
+  covers ⌈M/2⌉ rows instead of M. Single transforms are 1.3-1.45x faster on CPU
+  (nside 128).
+- **The ℓ-contraction runs in blocks of K steps.** The recursion emits a λ stack per
+  block, contracted as one matrix product batched over rows, instead of updating the
+  accumulators once per ℓ. Under `vmap` (where the recursion is shared across the batch)
+  this removes most of the contraction's memory traffic: 2-3x per batched call of 80
+  maps on CPU at nside 128, 2.3-4.9x for 40 maps on an RTX 3050 at nside 256.
+- Both apply to the on-grid and off-grid transforms; results agree with 0.5.0 to
+  rounding. The native-AD tape holds float64 λ blocks over the folded rows instead of
+  complex products (~0.3x the bytes).
 
 ### Added
 - `jht.set_ell_block(k)` / `jht.get_ell_block()`: the block size (`"auto"` by default:

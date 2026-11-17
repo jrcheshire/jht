@@ -77,7 +77,7 @@ def bench_point(kind, nside, lmax, spin, batch, block, grad, reps, rng):
         spin=spin,
         batch=batch,
         block=block,
-        K=jht._recursion.resolve_ell_block(block, lmax + 1, 2 * nside, 1 if spin == 0 else 2)
+        K=jht._recursion.resolve_ell_block(block, (lmax + 2) // 2, 2 * nside, 1 if spin == 0 else 2)
         if HAS_BLOCK
         else 0,
         jht_version=jht.__version__,
