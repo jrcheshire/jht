@@ -32,7 +32,13 @@ project depends on, and ``docs/gpu.md`` for GPU use.
 from __future__ import annotations
 
 from ._analysis import analysis, bare_analysis, map2alm
-from ._azimuth import enable_looped_fft, get_azimuth_fft_mode, set_azimuth_fft_mode
+from ._azimuth import (
+    enable_looped_fft,
+    get_azimuth_fft_mode,
+    get_cap_chunk,
+    set_azimuth_fft_mode,
+    set_cap_chunk,
+)
 from ._cache import enable_compilation_cache
 from ._recursion import get_ell_block, set_ell_block
 from .diff import (
@@ -47,9 +53,12 @@ from .diff import (
     synthesis_vjp,
 )
 from .healpix import (
+    LegendreTables,
     adjoint_synthesis,
     alm_metric_weight,
     alm_size,
+    legendre_tables,
+    legendre_tables_nbytes,
     synthesis,
 )
 from .masked import (
@@ -86,6 +95,9 @@ __all__ = [
     # core on-grid transforms
     "synthesis",  # S:  a_lm -> map
     "adjoint_synthesis",  # S^T: map -> a_lm (exact unweighted transpose / VJP)
+    "legendre_tables",  # stored lambda tables (tables= on the on-grid transforms)
+    "legendre_tables_nbytes",
+    "LegendreTables",
     # off-grid (arbitrary points / NUFFT) -- spin 0-3, alm- AND pointing-differentiable
     "synthesis_general",  # a_lm -> field at arbitrary (theta, phi)
     "adjoint_synthesis_general",  # its exact transpose
@@ -137,6 +149,8 @@ __all__ = [
     "set_azimuth_fft_mode",
     "get_azimuth_fft_mode",
     "enable_looped_fft",
+    "set_cap_chunk",
+    "get_cap_chunk",
     # l-block size of the Legendre contraction (memory vs passes over the accumulators)
     "set_ell_block",
     "get_ell_block",

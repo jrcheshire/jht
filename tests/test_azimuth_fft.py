@@ -22,7 +22,8 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from jht import get_azimuth_fft_mode, set_azimuth_fft_mode  # noqa: E402
+from jht import get_azimuth_fft_mode, get_cap_chunk, set_azimuth_fft_mode, set_cap_chunk  # noqa: E402
+from jht._azimuth import resolve_cap_chunk  # noqa: E402
 from jht.healpix import adjoint_synthesis, alm_column_base, alm_size, synthesis  # noqa: E402
 
 IDENT_TOL = 1e-12  # a-priori: looped vs unrolled is an exact identity to FFT roundoff
@@ -34,6 +35,7 @@ def _reset_mode():
     """Never let a test's mode flip leak into the next one."""
     yield
     set_azimuth_fft_mode("unrolled")
+    set_cap_chunk("auto")
 
 
 def _rand_alm(lmax, rng, lmin=0):
@@ -226,3 +228,49 @@ def test_mode_toggle_validation():
     with pytest.raises(ValueError, match="unknown azimuth FFT mode"):
         set_azimuth_fft_mode("bogus")
     assert get_azimuth_fft_mode() == "unrolled"  # unchanged after a bad set
+
+
+# --------------------------------------------------------------------------- #
+# cap chunking: G ring pairs per scan step == one ring pair per step
+# --------------------------------------------------------------------------- #
+# Per-ring arithmetic is identical for every G; batching G rings into one FFT call changes
+# only FFT roundoff (XLA's CPU FFT pairs rows, and a paired row differs from the same row
+# transformed alone at the ulp level -- DISCREPANCIES.md), so the gate is IDENT_TOL.
+@pytest.mark.parametrize("spin", [0, 2])
+@pytest.mark.parametrize("nside,lmax", [(8, 12), (16, 24), (32, 40)])
+def test_cap_chunk_matches_one_ring_per_step(nside, lmax, spin):
+    rng = np.random.default_rng(900 + nside + spin)
+    npix = 12 * nside**2
+    if spin == 0:
+        A = jnp.asarray(np.stack([_rand_alm(lmax, rng) for _ in range(3)]))
+        M = jnp.asarray(rng.standard_normal((3, npix)))
+    else:
+        A = jnp.asarray(np.stack([np.stack([_rand_alm(lmax, rng), _rand_alm(lmax, rng)]) for _ in range(3)]))
+        M = jnp.asarray(rng.standard_normal((3, 2, npix)))
+    set_azimuth_fft_mode("looped")
+
+    def run():
+        s = jax.jit(jax.vmap(lambda a: synthesis(a, nside, lmax, spin)))(A)
+        b = jax.jit(jax.vmap(lambda m: adjoint_synthesis(m, nside, lmax, spin)))(M)
+        return np.asarray(s), np.asarray(b)
+
+    set_cap_chunk(1)
+    s1, b1 = run()
+    for g in (3, 32, "auto"):  # 3 does not divide n_cap = nside - 1 here; 32 >= n_cap
+        set_cap_chunk(g)
+        s, b = run()
+        np.testing.assert_allclose(s, s1, rtol=0, atol=IDENT_TOL)
+        np.testing.assert_allclose(b, b1, rtol=0, atol=IDENT_TOL)
+
+
+def test_cap_chunk_setting():
+    for bad in (0, -2, 1.5, "big", True, None):
+        with pytest.raises(ValueError):
+            set_cap_chunk(bad)
+    set_cap_chunk(5)
+    assert get_cap_chunk() == 5
+    set_cap_chunk("auto")
+    assert get_cap_chunk() == "auto"
+    assert resolve_cap_chunk("auto", 511) == 32
+    assert resolve_cap_chunk("auto", 7) == 7  # never more than n_cap
+    assert resolve_cap_chunk(1, 511) == 1

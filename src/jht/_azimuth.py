@@ -89,6 +89,40 @@ def enable_looped_fft() -> None:
     set_azimuth_fft_mode("looped")
 
 
+_CAP_CHUNK: int | str = "auto"
+_CAP_CHUNK_AUTO = 32
+
+
+def set_cap_chunk(g: int | str) -> None:
+    """Set how many polar-cap rings the looped mode transforms per scan step.
+
+    The looped mode's chirp-z transform runs one ring length per ring pair; ``g`` ring
+    pairs share one scan step as a batched FFT, so a transform takes
+    ``ceil(n_cap / g)`` steps (``n_cap = nside - 1``) instead of ``n_cap``.  ``"auto"``
+    (default) is 32; ``1`` is one ring pair per step.  Per-ring arithmetic is the same
+    for every ``g``.  Each step holds ``O(g * B * L)`` complex values (``B`` the
+    channels per ring pair, ``L`` the common FFT length), times any ``vmap`` batch.
+
+    Process-global, like :func:`set_azimuth_fft_mode`; it is part of the transform
+    cache key, so changing it compiles fresh kernels.
+    """
+    if isinstance(g, bool) or not (g == "auto" or (isinstance(g, int) and g >= 1)):
+        raise ValueError(f"cap chunk must be 'auto' or an int >= 1, got {g!r}")
+    global _CAP_CHUNK
+    _CAP_CHUNK = g
+
+
+def get_cap_chunk() -> int | str:
+    """Return the current cap-chunk setting (see :func:`set_cap_chunk`)."""
+    return _CAP_CHUNK
+
+
+def resolve_cap_chunk(setting: int | str, n_cap: int) -> int:
+    """Ring pairs per scan step for ``n_cap`` cap groups."""
+    g = _CAP_CHUNK_AUTO if setting == "auto" else int(setting)
+    return max(1, min(g, n_cap))
+
+
 # --------------------------------------------------------------------------- #
 # cap plan (static NumPy tables)
 # --------------------------------------------------------------------------- #
@@ -102,6 +136,7 @@ class CapPlan(NamedTuple):
 
     M: int  # lmax + 1
     L: int  # common Bluestein FFT length
+    G: int  # cap groups per scan step (see set_cap_chunk)
     n_out: int  # padded cap ring length = max cap N = 4*(nside-1)
     n_cap: int  # number of cap length-groups
     cap_N: np.ndarray  # (n_cap,)     per-group ring length
@@ -111,11 +146,12 @@ class CapPlan(NamedTuple):
     phi0: np.ndarray  # (n_cap, 2)   azimuth of each cap ring's first pixel
 
 
-def build_cap_plan(geo, cap_groups: list, lmax: int) -> CapPlan:
+def build_cap_plan(geo, cap_groups: list, lmax: int, cap_chunk: int | str = "auto") -> CapPlan:
     """Build the static cap plan from the RingInfo geometry and cap ring groups.
 
     ``cap_groups`` is ``_ring_groups(...)[:-1]`` -- every group except the belt --
-    each with ``ring_idx`` of size 2 (north ring + south mirror).
+    each with ``ring_idx`` of size 2 (north ring + south mirror).  ``cap_chunk``: see
+    :func:`set_cap_chunk`.
     """
     M = lmax + 1
     n_cap = len(cap_groups)
@@ -139,7 +175,8 @@ def build_cap_plan(geo, cap_groups: list, lmax: int) -> CapPlan:
     start = geo.startpix[ring_idx].astype(np.int64)  # (n_cap, 2)
     phi0 = geo.phi0[ring_idx]  # (n_cap, 2)
 
-    return CapPlan(M=M, L=L, n_out=n_out, n_cap=n_cap, cap_N=cap_N, ring_idx=ring_idx,
+    G = resolve_cap_chunk(cap_chunk, n_cap)
+    return CapPlan(M=M, L=L, G=G, n_out=n_out, n_cap=n_cap, cap_N=cap_N, ring_idx=ring_idx,
                    take=take, start=start, phi0=phi0)
 
 
@@ -163,17 +200,21 @@ def cap_conj_phase(plan: CapPlan) -> jax.Array:
 
 
 # --------------------------------------------------------------------------- #
-# Bluestein pruned DFT, swept over cap groups by lax.scan
+# Bluestein pruned DFT, swept over chunks of cap groups by lax.scan
 # --------------------------------------------------------------------------- #
-def _bluestein_scan(cols: jax.Array, cap_N: np.ndarray, P: int, Q: int, L: int, sign: int) -> jax.Array:
+def _bluestein_scan(
+    cols: jax.Array, cap_N: np.ndarray, P: int, Q: int, L: int, sign: int, G: int = 1
+) -> jax.Array:
     """Chirp-z pruned DFT ``X[q] = sum_{p<P} x[p] exp(sign*2j*pi*p*q/N)``, q<Q.
 
     ``cols`` is ``(n_cap, B, P)``; the modulus ``N = cap_N[g]`` varies per group but
-    the FFT length ``L`` is common, so the scan body compiles one length-``L`` FFT.
-    Chirps are built in-body from the scalar ``N`` with an exact ``k^2 mod 2N``
-    argument reduction (mandatory: at ``N=4`` / large ``lmax`` the naive
-    ``exp(i*pi*k^2/N)`` loses ~8 digits).  The chirp kernel is placed scatter-free
-    via a static signed-index array.  Returns ``(n_cap, B, Q)``.
+    the FFT length ``L`` is common, so the scan body compiles one length-``L`` FFT,
+    batched over ``G`` groups per step (``n_cap`` is zero-padded to a multiple of
+    ``G`` with a dummy ``N = 4``; the pad rows are dropped).  Chirps are built in-body
+    from the per-group ``N`` with an exact ``k^2 mod 2N`` argument reduction
+    (mandatory: at ``N=4`` / large ``lmax`` the naive ``exp(i*pi*k^2/N)`` loses ~8
+    digits).  The chirp kernel is placed scatter-free via a static signed-index
+    array.  Returns ``(n_cap, B, Q)``.
     """
     # static index tables (baked into the jit trace as constants)
     p2 = (np.arange(P) ** 2).astype(np.int64)  # (P,)
@@ -196,17 +237,23 @@ def _bluestein_scan(cols: jax.Array, cap_N: np.ndarray, P: int, Q: int, L: int, 
         return jnp.exp(s * 1j * jnp.pi * r / N)
 
     def body(carry, xs):
-        N, x = xs  # N: (), x: (B, P)
-        apre = _chirp(p2, N, sign)  # (P,)
-        a = x * apre  # (B, P)
-        abuf = jnp.pad(a, ((0, 0), (0, pad)))  # (B, L)
-        kbuf = kused * _chirp(k2, N, -sign)  # (L,)
-        conv = jnp.fft.ifft(jnp.fft.fft(abuf, axis=-1) * jnp.fft.fft(kbuf), axis=-1)
-        out = conv[:, :Q] * _chirp(q2, N, sign)  # (B, Q)
+        N, x = xs  # N: (G, 1), x: (G, B, P)
+        apre = _chirp(p2, N, sign)  # (G, P)
+        a = x * apre[:, None, :]  # (G, B, P)
+        abuf = jnp.pad(a, ((0, 0), (0, 0), (0, pad)))  # (G, B, L)
+        kbuf = kused * _chirp(k2, N, -sign)  # (G, L)
+        conv = jnp.fft.ifft(jnp.fft.fft(abuf, axis=-1) * jnp.fft.fft(kbuf, axis=-1)[:, None, :], axis=-1)
+        out = conv[:, :, :Q] * _chirp(q2, N, sign)[:, None, :]  # (G, B, Q)
         return carry, out
 
-    _, ys = jax.lax.scan(body, 0.0, (cap_N, cols))
-    return ys  # (n_cap, B, Q)
+    n_cap, B = cols.shape[0], cols.shape[1]
+    n_chunk = -(-n_cap // G)
+    n_pad = n_chunk * G - n_cap
+    N_all = np.concatenate([np.asarray(cap_N, dtype=np.int64), np.full(n_pad, 4, dtype=np.int64)])
+    cols_p = jnp.pad(cols, ((0, n_pad), (0, 0), (0, 0))) if n_pad else cols
+    xs = (N_all.reshape(n_chunk, G, 1), cols_p.reshape(n_chunk, G, B, P))
+    _, ys = jax.lax.scan(body, 0.0, xs)
+    return ys.reshape(n_chunk * G, B, Q)[:n_cap]  # (n_cap, B, Q)
 
 
 # --------------------------------------------------------------------------- #
@@ -224,7 +271,7 @@ def cap_synth(plan: CapPlan, Fp: jax.Array, Fm: jax.Array) -> jax.Array:
     A = jnp.transpose(Fp[:, plan.ring_idx], (1, 2, 0))  # (n_cap, 2, M)
     B = jnp.transpose(Fm[:, plan.ring_idx] * m_nonzero[:, None, None], (1, 2, 0))
     cols = jnp.concatenate([A, B], axis=1)  # (n_cap, 4, M): [A_n, A_s, B_n, B_s]
-    out = _bluestein_scan(cols, plan.cap_N, P=M, Q=n_out, L=plan.L, sign=+1)  # (n_cap, 4, n_out)
+    out = _bluestein_scan(cols, plan.cap_N, P=M, Q=n_out, L=plan.L, sign=+1, G=plan.G)  # (n_cap, 4, n_out)
     qu = out[:, 0:2] + jnp.conj(out[:, 2:4])  # (n_cap, 2, n_out) = A_out + conj(B_out)
     return qu.reshape(-1)[plan.take]  # (npix_cap,)
 
@@ -239,7 +286,7 @@ def cap_adjoint(plan: CapPlan, cols: jax.Array) -> jax.Array:
     ``[g0_north, g0_south, g1_north, ...]`` to match the unrolled ``concat(cols)`` order.
     """
     M = plan.M
-    out = _bluestein_scan(cols, plan.cap_N, P=plan.n_out, Q=M, L=plan.L, sign=-1)  # (n_cap, C*2, M)
+    out = _bluestein_scan(cols, plan.cap_N, P=plan.n_out, Q=M, L=plan.L, sign=-1, G=plan.G)  # (n_cap, C*2, M)
     C2 = cols.shape[1]
     n_ch = C2 // 2
     # reshape to (n_ch, 2, ...) so conj_phase (n_cap, 2, M) broadcasts over rings

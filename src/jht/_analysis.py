@@ -46,20 +46,36 @@ def _wvec(nside: int, spin: int, use_weights: bool) -> np.ndarray:
     return wv if spin == 0 else wv[None, :]  # (Npix,) for spin 0, (1, Npix) for spin 2
 
 
-def bare_analysis(maps, nside: int, lmax: int, spin: int = 0, use_weights: bool = True) -> jax.Array:
-    """``A0 = S^T W`` -- the bare (non-iterated) estimator with quadrature weights."""
+def bare_analysis(
+    maps, nside: int, lmax: int, spin: int = 0, use_weights: bool = True, *, tables=None
+) -> jax.Array:
+    """``A0 = S^T W`` -- the bare (non-iterated) estimator with quadrature weights.
+
+    ``tables``: optional :func:`jht.legendre_tables` for ``(nside, lmax, spin)``.
+    """
     wmaps = _wvec(nside, spin, use_weights) * jnp.asarray(maps)
-    return adjoint_synthesis(wmaps, nside, lmax, spin)
+    return adjoint_synthesis(wmaps, nside, lmax, spin, tables=tables)
 
 
 def analysis(
-    maps, nside: int, lmax: int, spin: int = 0, niter: int = 3, use_weights: bool = True
+    maps,
+    nside: int,
+    lmax: int,
+    spin: int = 0,
+    niter: int = 3,
+    use_weights: bool = True,
+    *,
+    tables=None,
 ) -> jax.Array:
-    """Approximate inverse with ``niter`` Jacobi refinement steps (``niter=0`` = bare)."""
-    a = bare_analysis(maps, nside, lmax, spin, use_weights)
+    """Approximate inverse with ``niter`` Jacobi refinement steps (``niter=0`` = bare).
+
+    ``tables``: optional :func:`jht.legendre_tables` for ``(nside, lmax, spin)``, used by
+    every transform in the iteration.
+    """
+    a = bare_analysis(maps, nside, lmax, spin, use_weights, tables=tables)
     for _ in range(niter):
-        residual = maps - synthesis(a, nside, lmax, spin)
-        a = a + bare_analysis(residual, nside, lmax, spin, use_weights)
+        residual = maps - synthesis(a, nside, lmax, spin, tables=tables)
+        a = a + bare_analysis(residual, nside, lmax, spin, use_weights, tables=tables)
     return a
 
 

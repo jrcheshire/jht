@@ -171,32 +171,36 @@ def bandpower(alm, lmax: int, spin: int = 0) -> jax.Array:
 # --------------------------------------------------------------------------- #
 # reverse-only transforms: native AD's gradients without the recursion tape
 # --------------------------------------------------------------------------- #
-def synthesis_vjp(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
+def synthesis_vjp(alm, nside: int, lmax: int, spin: int = 0, *, tables=None) -> jax.Array:
     """:func:`jht.synthesis` with a transpose-pair ``custom_vjp`` (reverse mode only).
 
     Same values as :func:`jht.synthesis`. The VJP is one :func:`jht.adjoint_synthesis`
     call and equals native AD's cotangent, ``G * conj(S^T v)`` including the spin-2 m=0
     E/B term (``docs/design.md``). Native AD through the Legendre recursion keeps one
     ``(lmax+1, lmax+1, 2 nside)`` table per transform for the backward; this keeps none.
-    ``jax.jvp`` / ``jacfwd`` raise. A real ``alm`` is cast to complex.
+    ``jax.jvp`` / ``jacfwd`` raise. A real ``alm`` is cast to complex. ``tables``:
+    optional :func:`jht.legendre_tables`, used by both directions (no cotangent).
     """
     a = jnp.asarray(alm)
     if not jnp.iscomplexobj(a):
         a = a.astype(jnp.result_type(a.dtype, jnp.complex64))
-    return _synthesis_vjp(a, int(nside), int(lmax), int(spin))
+    return _synthesis_vjp(a, tables, int(nside), int(lmax), int(spin))
 
 
-def adjoint_synthesis_vjp(maps, nside: int, lmax: int, spin: int = 0) -> jax.Array:
+def adjoint_synthesis_vjp(
+    maps, nside: int, lmax: int, spin: int = 0, *, tables=None
+) -> jax.Array:
     """:func:`jht.adjoint_synthesis` with a transpose-pair ``custom_vjp`` (reverse mode only).
 
     Same values as :func:`jht.adjoint_synthesis`. The VJP is one :func:`jht.synthesis`
     call and equals native AD's cotangent; no recursion table is kept for the backward.
-    ``jax.jvp`` / ``jacfwd`` raise. An integer ``maps`` is cast to float.
+    ``jax.jvp`` / ``jacfwd`` raise. An integer ``maps`` is cast to float. ``tables``:
+    as in :func:`synthesis_vjp`.
     """
     m = jnp.asarray(maps)
     if not jnp.issubdtype(m.dtype, jnp.floating):
         m = m.astype(jnp.result_type(float))
-    return _adjoint_synthesis_vjp(m, int(nside), int(lmax), int(spin))
+    return _adjoint_synthesis_vjp(m, tables, int(nside), int(lmax), int(spin))
 
 
 def _m0_mask(lmax: int) -> jax.Array:
@@ -204,44 +208,44 @@ def _m0_mask(lmax: int) -> jax.Array:
     return jax.lax.optimization_barrier(jnp.arange(alm_size(lmax)) <= lmax)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
-def _synthesis_vjp(alm, nside, lmax, spin):
-    return synthesis(alm, nside, lmax, spin)
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _synthesis_vjp(alm, tables, nside, lmax, spin):
+    return synthesis(alm, nside, lmax, spin, tables=tables)
 
 
-def _synthesis_vjp_fwd(alm, nside, lmax, spin):
-    return synthesis(alm, nside, lmax, spin), None
+def _synthesis_vjp_fwd(alm, tables, nside, lmax, spin):
+    return synthesis(alm, nside, lmax, spin, tables=tables), tables
 
 
-def _synthesis_vjp_bwd(nside, lmax, spin, _res, v):
-    b = adjoint_synthesis(v, nside, lmax, spin)
+def _synthesis_vjp_bwd(nside, lmax, spin, tables, v):
+    b = adjoint_synthesis(v, nside, lmax, spin, tables=tables)
     m0 = _m0_mask(lmax)
     cot = jnp.where(m0, 1.0, 2.0) * jnp.conj(b)  # G * conj(S^T v)
     if spin == 0:
-        return (cot,)
+        return (cot, None)
     # spin-2 m=0: the map depends on Im(a_l0) too, and native AD carries that direction
     bE, bB = jnp.real(b[0]), jnp.real(b[1])
     cot_E = jnp.where(m0, bE - 1j * bB, cot[0])
     cot_B = jnp.where(m0, bB + 1j * bE, cot[1])
-    return (jnp.stack([cot_E, cot_B]),)
+    return (jnp.stack([cot_E, cot_B]), None)
 
 
 _synthesis_vjp.defvjp(_synthesis_vjp_fwd, _synthesis_vjp_bwd)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
-def _adjoint_synthesis_vjp(maps, nside, lmax, spin):
-    return adjoint_synthesis(maps, nside, lmax, spin)
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _adjoint_synthesis_vjp(maps, tables, nside, lmax, spin):
+    return adjoint_synthesis(maps, nside, lmax, spin, tables=tables)
 
 
-def _adjoint_synthesis_vjp_fwd(maps, nside, lmax, spin):
-    return adjoint_synthesis(maps, nside, lmax, spin), None
+def _adjoint_synthesis_vjp_fwd(maps, tables, nside, lmax, spin):
+    return adjoint_synthesis(maps, nside, lmax, spin, tables=tables), tables
 
 
-def _adjoint_synthesis_vjp_bwd(nside, lmax, spin, _res, c):
+def _adjoint_synthesis_vjp_bwd(nside, lmax, spin, tables, c):
     # the synthesis input whose map is the cotangent: Re(c) at m=0, conj(c)/2 at m>0
     a = jnp.where(_m0_mask(lmax), jnp.real(c).astype(c.dtype), jnp.conj(c) / 2.0)
-    return (synthesis(a, nside, lmax, spin),)
+    return (synthesis(a, nside, lmax, spin, tables=tables), None)
 
 
 _adjoint_synthesis_vjp.defvjp(_adjoint_synthesis_vjp_fwd, _adjoint_synthesis_vjp_bwd)

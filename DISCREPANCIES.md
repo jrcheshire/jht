@@ -110,3 +110,15 @@ path behaves identically.
   and compiled with compiled (`tests/test_offgrid_prepared.py`); finiteness on grid-aligned
   points is gated in `tests/test_diff_offgrid.py`.
 
+## Looped-mode cap chunking: batched FFT rows differ from single rows at the ulp level (expected, not a defect)
+
+`set_cap_chunk(G)` transforms G polar-cap ring pairs per scan step as one batched FFT.
+The per-ring arithmetic is the same for every G, but results differ from `G = 1` by a few
+ulps (~1e-14 absolute on O(10-50) values at nside 8-32). Localized on CPU: XLA's FFT
+processes rows in pairs, and a row computed in a pair differs from the same row
+transformed alone (in a batch of 3 rows, rows 0 and 1 differ by ~1e-14, row 2 is
+bitwise equal); a batched FFT and the chirp evaluation are each bitwise when compared
+like for like.
+
+- **Status:** FFT roundoff from batching; gated at the looped-mode identity tolerance
+  `IDENT_TOL = 1e-12` (`tests/test_azimuth_fft.py::test_cap_chunk_matches_one_ring_per_step`).

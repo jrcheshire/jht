@@ -764,19 +764,37 @@ def adjoint_contract(plan: RecursionPlan, x, V, ell_block: int | str = "auto") -
 # *together* over the half grid (still one half-grid pass each -> the 2x win), but
 # with the south hemisphere of each channel built from the *other* spin's column.
 # --------------------------------------------------------------------------- #
-def synth_contract_eo(plan: RecursionPlan, x, alm_dense, ell_block: int | str = "auto"):
+def synth_contract_eo(
+    plan: RecursionPlan, x, alm_dense, ell_block: int | str = "auto", lam=None
+):
     """Half-grid synthesis (spin-0): returns ``(F_total, F_signed)`` of shape ``(M, T)``.
 
     ``F_total = sum_l alm pref lambda``  and  ``F_signed = sum_l (-1)^l alm pref lambda``
     over the (north-half) colatitudes ``x``.  The caller forms
-    ``F_north = F_total`` and ``F_south = (-1)^m F_signed``.
+    ``F_north = F_total`` and ``F_south = (-1)^m F_signed``.  ``lam``: optional stored
+    ``(nb, K, R, T)`` table from :func:`lambda_blocks_one`, read in place of the
+    recursion (its ``K`` overrides ``ell_block``).
     """
     fold = _fold_np(plan.lmax, abs(plan.spin))
     A, B, C, pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
     x = jnp.asarray(x)
     R, T = fold.R, x.shape[0]
-    K = resolve_ell_block(ell_block, R, T, 1)
     coef = _fold_coef(fold, alm_dense) * pref
+    par = _parity_cells(fold)
+
+    if lam is not None:
+        K = _check_lam(lam, fold, T)
+
+        def block_t(F, xs):
+            c_k, pb_k, par_k, lam_k = xs
+            ca, cb = _ab(c_k, pb_k)
+            return F + _synth_gemm(jnp.stack([ca, par_k * ca, cb, par_k * cb]), lam_k), None
+
+        c_b, pb_b, par_b = _blocked((coef, fold.phase_b, par), K)
+        F, _ = jax.lax.scan(block_t, jnp.zeros((4, R, T), jnp.complex128), (c_b, pb_b, par_b, lam))
+        return _unfold_rows(fold, F[0], F[2]), _unfold_rows(fold, F[1], F[3])
+
+    K = resolve_ell_block(ell_block, R, T, 1)
     step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
 
     def block(carry, xs):
@@ -788,35 +806,48 @@ def synth_contract_eo(plan: RecursionPlan, x, alm_dense, ell_block: int | str = 
 
     z = jnp.zeros((R, T), dtype=jnp.float64)
     init = ((z, z, z), jnp.zeros((4, R, T), dtype=jnp.complex128))
-    xs = _blocked((A, B, C, coef, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)), K)
+    xs = _blocked((A, B, C, coef, fold.seed, fold.active, fold.phase_b, par), K)
     (_, F), _ = jax.lax.scan(block, init, xs)
     return _unfold_rows(fold, F[0], F[2]), _unfold_rows(fold, F[1], F[3])
 
 
-def adjoint_contract_eo(plan: RecursionPlan, x, Vn, Vs, ell_block: int | str = "auto"):
+def adjoint_contract_eo(
+    plan: RecursionPlan, x, Vn, Vs, ell_block: int | str = "auto", lam=None
+):
     """Half-grid adjoint (spin-0): ``b_{l,m} = sum_theta lambda (Vn + (-1)^l Vs)``.
 
     ``Vn`` is the north-half per-m data, ``Vs = (-1)^m V_south`` (the reflected
     south data with the m-parity folded in; equator column zero).  Returns the
-    dense ``(M, lmax+1)`` coefficients.
+    dense ``(M, lmax+1)`` coefficients.  ``lam``: as in :func:`synth_contract_eo`.
     """
     fold = _fold_np(plan.lmax, abs(plan.spin))
     A, B, C, pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
     x = jnp.asarray(x)
     Vn, Vs = jnp.asarray(Vn), jnp.asarray(Vs)
     R, T = fold.R, x.shape[0]
-    K = resolve_ell_block(ell_block, R, T, 1)
     V = jnp.stack([Vn[fold.m_a], Vs[fold.m_a], Vn[fold.m_b], Vs[fold.m_b]])  # (4, R, T)
+    par = _parity_cells(fold)
+
+    def contract(lam_k, pref_k, pb_k, par_k):
+        g = _adj_gemm(lam_k, V)  # (4, K, R)
+        return pref_k * _sel(pb_k, g[2] + par_k * g[3], g[0] + par_k * g[1])
+
+    if lam is not None:
+        K = _check_lam(lam, fold, T)
+        xs = (*_blocked((pref, fold.phase_b, par), K), lam)
+        _, b = jax.lax.scan(lambda c, xs: (c, contract(xs[3], xs[0], xs[1], xs[2])), 0, xs)
+        return _unfold_cells(fold, b.reshape(-1, R), plan.lmax)
+
+    K = resolve_ell_block(ell_block, R, T, 1)
     step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
 
     def block(rec, xs):
         A_k, B_k, C_k, pref_k, sd_k, ac_k, pb_k, par_k = xs
         rec, lam = jax.lax.scan(step, rec, (A_k, B_k, C_k, sd_k, ac_k, pb_k))
-        g = _adj_gemm(lam, V)  # (4, K, R)
-        return rec, pref_k * _sel(pb_k, g[2] + par_k * g[3], g[0] + par_k * g[1])
+        return rec, contract(lam, pref_k, pb_k, par_k)
 
     z = jnp.zeros((R, T), dtype=jnp.float64)
-    xs = _blocked((A, B, C, pref, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)), K)
+    xs = _blocked((A, B, C, pref, fold.seed, fold.active, fold.phase_b, par), K)
     _, b = jax.lax.scan(block, (z, z, z), xs)
     return _unfold_cells(fold, b.reshape(-1, R), plan.lmax)
 
@@ -832,85 +863,179 @@ def _two_state_arrays(plan_p: RecursionPlan, plan_m: RecursionPlan, fold: _Fold)
     return Ap, Bp, Cp, Am, Bm, Cm, pref, tuple(seeds_p), tuple(seeds_m)
 
 
-def synth_contract_spin2_ns(plan_p, plan_m, x, bp_dense, bm_dense, ell_block: int | str = "auto"):
+def synth_contract_spin2_ns(
+    plan_p, plan_m, x, bp_dense, bm_dense, ell_block: int | str = "auto", lam=None
+):
     """Half-grid spin-2 synthesis.  Returns ``(Fp_north, Fp_south, Fm_north, Fm_south)``.
 
     ``bp = -(aE + i aB)``, ``bm = -(aE - i aB)`` (dense ``(M, lmax+1)``).  The
     south halves still carry the ``(-1)^m`` factor for the caller to apply.  The
-    south of each channel uses the *other* spin's column.
+    south of each channel uses the *other* spin's column.  ``lam``: optional stored
+    ``(lam_p, lam_m)`` pair of ``(nb, K, R, T)`` tables from :func:`lambda_blocks_two`,
+    read in place of the recursion (its ``K`` overrides ``ell_block``).
     """
     fold = _fold_np(plan_p.lmax, abs(plan_p.spin))
     Ap, Bp, Cp, Am, Bm, Cm, pref, seeds_p, seeds_m = _two_state_arrays(plan_p, plan_m, fold)
     x = jnp.asarray(x)
     R, T = fold.R, x.shape[0]
-    K = resolve_ell_block(ell_block, R, T, 2)
     cp = _fold_coef(fold, bp_dense) * pref
     cm = _fold_coef(fold, bm_dense) * pref
-    step = _two_state_step(x, seeds_p, seeds_m)
+    par = _parity_cells(fold)
 
-    def block(carry, xs):
-        rec, Fp, Fm = carry  # Fp: (FpN, FmS) A/B from lambda_+; Fm: (FmN, FpS) A/B from lambda_-
-        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, cp_k, cm_k, sd_k, ac_k, pb_k, par_k = xs
-        rec, (lam_p, lam_m) = jax.lax.scan(
-            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k, pb_k)
-        )
+    def contract(Fp, Fm, cp_k, cm_k, pb_k, par_k, lam_p, lam_m):
+        # Fp: (FpN, FmS) A/B from lambda_+; Fm: (FmN, FpS) A/B from lambda_-
         cpa, cpb = _ab(cp_k, pb_k)
         cma, cmb = _ab(cm_k, pb_k)
         Fp = Fp + _synth_gemm(jnp.stack([cpa, par_k * cma, cpb, par_k * cmb]), lam_p)
         Fm = Fm + _synth_gemm(jnp.stack([cma, par_k * cpa, cmb, par_k * cpb]), lam_m)
-        return (rec, Fp, Fm), None
+        return Fp, Fm
 
-    z = jnp.zeros((R, T), dtype=jnp.float64)
     zc = jnp.zeros((4, R, T), dtype=jnp.complex128)
-    init = ((z, z, z, z, z, z), zc, zc)
-    xs = _blocked(
-        (Ap, Bp, Cp, Am, Bm, Cm, cp, cm, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)),
-        K,
-    )
-    (_, Fp, Fm), _ = jax.lax.scan(block, init, xs)
+    if lam is not None:
+        lam_p_t, lam_m_t = lam
+        K = _check_lam(lam_p_t, fold, T)
+        _check_lam(lam_m_t, fold, T)
+
+        def block_t(carry, xs):
+            return contract(*carry, *xs), None
+
+        xs = (*_blocked((cp, cm, fold.phase_b, par), K), lam_p_t, lam_m_t)
+        (Fp, Fm), _ = jax.lax.scan(block_t, (zc, zc), xs)
+    else:
+        K = resolve_ell_block(ell_block, R, T, 2)
+        step = _two_state_step(x, seeds_p, seeds_m)
+
+        def block(carry, xs):
+            rec, Fp, Fm = carry
+            Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, cp_k, cm_k, sd_k, ac_k, pb_k, par_k = xs
+            rec, (lam_p, lam_m) = jax.lax.scan(
+                step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k, pb_k)
+            )
+            Fp, Fm = contract(Fp, Fm, cp_k, cm_k, pb_k, par_k, lam_p, lam_m)
+            return (rec, Fp, Fm), None
+
+        z = jnp.zeros((R, T), dtype=jnp.float64)
+        init = ((z, z, z, z, z, z), zc, zc)
+        xs = _blocked(
+            (Ap, Bp, Cp, Am, Bm, Cm, cp, cm, fold.seed, fold.active, fold.phase_b, par), K
+        )
+        (_, Fp, Fm), _ = jax.lax.scan(block, init, xs)
     FpN, FmS = _unfold_rows(fold, Fp[0], Fp[2]), _unfold_rows(fold, Fp[1], Fp[3])
     FmN, FpS = _unfold_rows(fold, Fm[0], Fm[2]), _unfold_rows(fold, Fm[1], Fm[3])
     return FpN, FpS, FmN, FmS
 
 
-def adjoint_contract_spin2_ns(plan_p, plan_m, x, Vpn, Sp, Vmn, Sm, ell_block: int | str = "auto"):
+def adjoint_contract_spin2_ns(
+    plan_p, plan_m, x, Vpn, Sp, Vmn, Sm, ell_block: int | str = "auto", lam=None
+):
     """Half-grid spin-2 adjoint.  Returns ``(p2, m2)`` dense ``(M, lmax+1)``.
 
     ``Vpn / Vmn`` are the north-half +/- channel data; ``Sp = (-1)^m Vp_south``,
     ``Sm = (-1)^m Vm_south`` (reflected south with the m-parity folded in).
     ``p2`` contracts the +2 column with the north + the -2 column with the south;
-    ``m2`` the mirror.
+    ``m2`` the mirror.  ``lam``: as in :func:`synth_contract_spin2_ns`.
     """
     fold = _fold_np(plan_p.lmax, abs(plan_p.spin))
     Ap, Bp, Cp, Am, Bm, Cm, pref, seeds_p, seeds_m = _two_state_arrays(plan_p, plan_m, fold)
     x = jnp.asarray(x)
     R, T = fold.R, x.shape[0]
-    K = resolve_ell_block(ell_block, R, T, 2)
     Vpn, Sp, Vmn, Sm = (jnp.asarray(a) for a in (Vpn, Sp, Vmn, Sm))
     ma, mb = fold.m_a, fold.m_b
     Vp = jnp.stack([Vpn[ma], Sm[ma], Vpn[mb], Sm[mb]])  # contracted with lambda_+
     Vm = jnp.stack([Vmn[ma], Sp[ma], Vmn[mb], Sp[mb]])  # contracted with lambda_-
-    step = _two_state_step(x, seeds_p, seeds_m)
+    par = _parity_cells(fold)
 
-    def block(rec, xs):
-        Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, pref_k, sd_k, ac_k, pb_k, par_k = xs
-        rec, (lam_p, lam_m) = jax.lax.scan(
-            step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k, pb_k)
-        )
+    def contract(lam_p, lam_m, pref_k, pb_k, par_k):
         gp = _adj_gemm(lam_p, Vp)  # (4, K, R): lam_+ . [Vpn_A, Sm_A, Vpn_B, Sm_B]
         gm = _adj_gemm(lam_m, Vm)  # (4, K, R): lam_- . [Vmn_A, Sp_A, Vmn_B, Sp_B]
         p2 = _sel(pb_k, gp[2] + par_k * gm[3], gp[0] + par_k * gm[1])
         m2 = _sel(pb_k, gm[2] + par_k * gp[3], gm[0] + par_k * gp[1])
-        return rec, (pref_k * p2, pref_k * m2)
+        return pref_k * p2, pref_k * m2
 
-    z = jnp.zeros((R, T), dtype=jnp.float64)
-    xs = _blocked(
-        (Ap, Bp, Cp, Am, Bm, Cm, pref, fold.seed, fold.active, fold.phase_b, _parity_cells(fold)),
-        K,
-    )
-    _, (p2, m2) = jax.lax.scan(block, (z, z, z, z, z, z), xs)
+    if lam is not None:
+        lam_p_t, lam_m_t = lam
+        K = _check_lam(lam_p_t, fold, T)
+        _check_lam(lam_m_t, fold, T)
+
+        def block_t(c, xs):
+            pref_k, pb_k, par_k, lp, lm = xs
+            return c, contract(lp, lm, pref_k, pb_k, par_k)
+
+        xs = (*_blocked((pref, fold.phase_b, par), K), lam_p_t, lam_m_t)
+        _, (p2, m2) = jax.lax.scan(block_t, 0, xs)
+    else:
+        K = resolve_ell_block(ell_block, R, T, 2)
+        step = _two_state_step(x, seeds_p, seeds_m)
+
+        def block(rec, xs):
+            Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, pref_k, sd_k, ac_k, pb_k, par_k = xs
+            rec, (lam_p, lam_m) = jax.lax.scan(
+                step, rec, (Ap_k, Bp_k, Cp_k, Am_k, Bm_k, Cm_k, sd_k, ac_k, pb_k)
+            )
+            return rec, contract(lam_p, lam_m, pref_k, pb_k, par_k)
+
+        z = jnp.zeros((R, T), dtype=jnp.float64)
+        xs = _blocked(
+            (Ap, Bp, Cp, Am, Bm, Cm, pref, fold.seed, fold.active, fold.phase_b, par), K
+        )
+        _, (p2, m2) = jax.lax.scan(block, (z, z, z, z, z, z), xs)
     lmax = plan_p.lmax
     return (
         _unfold_cells(fold, p2.reshape(-1, R), lmax),
         _unfold_cells(fold, m2.reshape(-1, R), lmax),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Stored lambda tables.
+#
+# The half-grid contractions above can read lambda from a stored (nb, K, R, T) table
+# instead of running the recursion.  The builders below run the same folded sweep
+# (_fold_tables + _one_state_step / _two_state_step, same blocking) and keep every
+# block's lambda stack, so a stored table holds the values the recursion path computes
+# per call; the contraction then repeats the same GEMMs in the same order.  Size is
+# 8 * nb * K * R * T bytes per table (R = ceil((lmax+1)/2), T = 2*nside).
+# --------------------------------------------------------------------------- #
+def _check_lam(lam, fold: _Fold, T: int) -> int:
+    """Validate a stored ``(nb, K, R, T)`` table against the fold; return its ``K``."""
+    nb, K, R, T_l = lam.shape
+    if R != fold.R or T_l != T or nb * K < fold.S or (nb - 1) * K >= fold.S:
+        raise ValueError(
+            f"stored lambda table shape {lam.shape} does not match this transform "
+            f"(R={fold.R}, T={T}, {fold.S} steps)"
+        )
+    return int(K)
+
+
+def lambda_blocks_one(plan: RecursionPlan, x, K: int) -> jax.Array:
+    """Stored ``(nb, K, R, T)`` lambda table of the folded one-state sweep (spin 0)."""
+    fold = _fold_np(plan.lmax, abs(plan.spin))
+    A, B, C, _pref, ss_a, ss_b, sl_a, sl_b = _fold_tables(plan, fold)
+    x = jnp.asarray(x)
+    R, T = fold.R, x.shape[0]
+    step = _one_state_step(x, ss_a, ss_b, sl_a, sl_b)
+
+    def block(rec, xs):
+        return jax.lax.scan(step, rec, xs)
+
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    xs = _blocked((A, B, C, fold.seed, fold.active, fold.phase_b), K)
+    _, lam = jax.lax.scan(block, (z, z, z), xs)
+    return lam
+
+
+def lambda_blocks_two(plan_p: RecursionPlan, plan_m: RecursionPlan, x, K: int):
+    """Stored ``(lam_p, lam_m)`` tables, each ``(nb, K, R, T)``, of the two-state sweep (spin 2)."""
+    fold = _fold_np(plan_p.lmax, abs(plan_p.spin))
+    Ap, Bp, Cp, Am, Bm, Cm, _pref, seeds_p, seeds_m = _two_state_arrays(plan_p, plan_m, fold)
+    x = jnp.asarray(x)
+    R, T = fold.R, x.shape[0]
+    step = _two_state_step(x, seeds_p, seeds_m)
+
+    def block(rec, xs):
+        return jax.lax.scan(step, rec, xs)
+
+    z = jnp.zeros((R, T), dtype=jnp.float64)
+    xs = _blocked((Ap, Bp, Cp, Am, Bm, Cm, fold.seed, fold.active, fold.phase_b), K)
+    _, (lam_p, lam_m) = jax.lax.scan(block, (z, z, z, z, z, z), xs)
+    return lam_p, lam_m

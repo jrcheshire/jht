@@ -34,6 +34,8 @@ EXPECTED = {
     "enable_compilation_cache",
     "set_azimuth_fft_mode", "get_azimuth_fft_mode", "enable_looped_fft",
     "set_ell_block", "get_ell_block",
+    "legendre_tables", "legendre_tables_nbytes", "LegendreTables",
+    "set_cap_chunk", "get_cap_chunk",
 }
 
 
@@ -60,6 +62,8 @@ def test_reexports_are_the_real_objects():
         assert getattr(jht, name) is getattr(offgrid, name)
     assert jht.alm_size is healpix.alm_size
     assert jht.alm_metric_weight is healpix.alm_metric_weight
+    for name in ("legendre_tables", "legendre_tables_nbytes", "LegendreTables"):
+        assert getattr(jht, name) is getattr(healpix, name)
     assert jht.analysis is _analysis.analysis
     assert jht.map2alm is _analysis.map2alm
     assert jht.map2alm is jht.analysis  # map2alm is the back-compat alias of analysis

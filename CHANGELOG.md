@@ -20,9 +20,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rounding. The native-AD tape holds float64 λ blocks over the folded rows instead of
   complex products (~0.3x the bytes).
 
+- **The looped mode's polar-cap scan transforms 32 ring pairs per step** (batched FFT)
+  instead of one, so a transform takes ⌈(nside−1)/32⌉ scan steps instead of nside−1.
+  Results agree with one ring pair per step to FFT roundoff.
+
 ### Added
 - `jht.set_ell_block(k)` / `jht.get_ell_block()`: the block size (`"auto"` by default:
   up to 32, limited to a 512 MiB λ stack). Part of the transform cache key.
+- **Stored Legendre tables.** `jht.legendre_tables(nside, lmax, spin)` returns a
+  `jht.LegendreTables` pytree; `tables=` on `synthesis`, `adjoint_synthesis`,
+  `analysis` / `bare_analysis`, `synthesis_vjp` and `adjoint_synthesis_vjp` reads λ from it
+  instead of running the ℓ-recursion. Same values and contraction order as the recursion
+  path. `jht.legendre_tables_nbytes` gives the size (~2.4 GB per table at nside 512 /
+  lmax 768). The transforms raise if concrete tables would be compiled into a jitted
+  program as constants; pass them as arguments.
+- `jht.set_cap_chunk(g)` / `jht.get_cap_chunk()`: ring pairs per step of the looped
+  mode's cap scan (`"auto"` = 32). Part of the transform cache key.
 - `scripts/bench_contract.py`: batched transform timings over batch size and block size.
 
 ## [0.5.0] - 2026-11-14

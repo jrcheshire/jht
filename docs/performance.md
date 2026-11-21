@@ -119,13 +119,40 @@ GPUs.
 Reverse mode saves the λ values per block, `(n_blocks, K, ⌈M/2⌉, n_θ)` float64, where the
 rectangular per-row contraction saved complex `(L, M, n_θ)` products: ~0.3× the bytes.
 
+## Stored Legendre tables
+
+`jht.legendre_tables(nside, lmax, spin)` precomputes the λ values the folded recursion
+produces and returns a `jht.LegendreTables`; pass it as `tables=` to `synthesis`,
+`adjoint_synthesis`, `analysis` / `bare_analysis` or the `*_vjp` wrappers, and the
+transform reads λ from it instead of running the ℓ-recursion. The contraction is the
+same block GEMM in the same order, so results equal the recursion path (bitwise on one
+backend). The table's ℓ-block K is fixed when it is built and overrides
+`set_ell_block` for transforms that use it.
+
+Size (`jht.legendre_tables_nbytes`): `8 · n_tab · nb · K · ⌈(lmax+1)/2⌉ · 2 nside` bytes,
+`n_tab` = 1 (spin 0) or 2 (spin 2), `nb · K ≥ lmax + 2` folded steps. About 2.4 GB per
+table at nside 512 / lmax 768, so 7.3 GB for spin 0 + spin 2; it grows as nside · lmax²,
+so it is a moderate-nside option (~150 GB per table at nside 2048 / lmax 3072).
+
+When it pays: many transforms at one `(nside, lmax, spin)` -- iterated `analysis`,
+`vmap` over many maps, Monte Carlo loops, gradients. A transform then streams the table
+once (shared across a `vmap` batch) instead of running ~lmax recursion steps, each a
+small memory-bound kernel. Reverse mode needs no λ tape for the transform either.
+
+**Pass the tables as an argument.** Inside `jit` or a `lax.scan` / `lax.map` body, a
+closed-over array is compiled into the program as a constant (one copy per use, and on
+GPU loaded outside JAX's memory pool). The transforms raise if they find concrete tables
+while a jaxpr is being staged; build them eagerly and pass them through the jitted
+function's arguments (an unbatched `in_axes=None` under `vmap`), or build them inside the
+traced function.
+
 ## Known costs
 
 - **Compile time** grows with the number of cap-FFT length groups (~nside distinct
   lengths in one jit). It is one-time per program and modest on CPU, but multi-minute
   at nside ≥ 1024 on GPU; see "Compile time" below.
 - **`analysis` recomputes the recursion** in each of its `1 + 2·niter` passes (the
-  memory-safe on-the-fly choice).
+  memory-safe on-the-fly choice) unless it is given `tables=`.
 
 Ring weights and the accuracy matrix are in `docs/accuracy.md`; partial-sky analysis in
 `docs/masked.md`.
@@ -237,3 +264,11 @@ looped ≈ flat). The default stays `"unrolled"` — faster for a single transfo
 one-time compile is cached by lever 1. Numerically the two modes agree to FFT roundoff
 (gated at `atol=1e-12` vs the unrolled path, plus healpy/ducc0 parity;
 `tests/test_azimuth_fft.py`).
+
+The scan transforms `G` ring pairs per step as one batched FFT (`jht.set_cap_chunk(g)`,
+default `"auto"` = 32, capped at the `nside − 1` cap groups), so a transform takes
+`⌈(nside−1)/G⌉` steps instead of `nside − 1`. On GPU each step is a few small kernels, so
+the step count, not the FFT work, sets the cost of the cap path. Each step holds
+`O(G · B · L)` complex values per transform (`B` ≤ 4 channels per ring pair), times any
+`vmap` batch: about 0.5 GB per buffer for 80 batched spin-2 maps at nside 512 and G = 32.
+Results match `G = 1` to FFT roundoff.

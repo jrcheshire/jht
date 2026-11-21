@@ -26,9 +26,10 @@ callers opt in per entry point.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from functools import lru_cache
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -40,12 +41,17 @@ from ._azimuth import (
     cap_gather_mask,
     cap_synth,
     get_azimuth_fft_mode,
+    get_cap_chunk,
 )
 from ._recursion import (
     adjoint_contract_eo,
     adjoint_contract_spin2_ns,
+    _fold_np,
     build_recursion_plan,
     get_ell_block,
+    lambda_blocks_one,
+    lambda_blocks_two,
+    resolve_ell_block,
     synth_contract_eo,
     synth_contract_spin2_ns,
 )
@@ -185,8 +191,8 @@ def _ring_groups(geo: RingInfo, lmax: int) -> list[_RingGroup]:
 # prepared (cached) transform kernels
 # --------------------------------------------------------------------------- #
 class _Prepared(NamedTuple):
-    synth: Callable[[jax.Array], jax.Array]
-    adj: Callable[[jax.Array], jax.Array]
+    synth: Callable[..., jax.Array]  # (alm, lam) -> map; lam None = run the recursion
+    adj: Callable[..., jax.Array]  # (map, lam) -> alm
 
 
 def _opaque(fn):
@@ -204,10 +210,15 @@ def _opaque(fn):
 
 @lru_cache(maxsize=None)
 def _prepare(
-    nside: int, lmax: int, spin: int, fft_mode: str = "unrolled", ell_block: int | str = "auto"
+    nside: int,
+    lmax: int,
+    spin: int,
+    fft_mode: str = "unrolled",
+    ell_block: int | str = "auto",
+    cap_chunk: int | str = "auto",
 ) -> _Prepared:
-    # ``fft_mode`` and ``ell_block`` are part of the cache key: :func:`synthesis` /
-    # :func:`adjoint_synthesis` read the process-global azimuth mode / l-block and forward
+    # ``fft_mode``, ``ell_block`` and ``cap_chunk`` are part of the cache key: :func:`synthesis` /
+    # :func:`adjoint_synthesis` read the process-global azimuth mode / l-block / cap chunk and forward
     # them here, so flipping one compiles a fresh kernel (both variants coexist) rather than silently returning a
     # stale one.  Do NOT read the global inside this cached body -- that is the
     # ``jax_enable_x64`` hazard below (a global read here is invisible to the key).
@@ -295,7 +306,7 @@ def _prepare(
     # >1 group (nside=1 is belt-only and already O(1), so it stays unrolled).
     looped = fft_mode == "looped" and len(groups) > 1
     if looped:
-        cap_plan = build_cap_plan(geo, groups[:-1], lmax)
+        cap_plan = build_cap_plan(geo, groups[:-1], lmax, cap_chunk)
         azimuth_groups = groups[-1:]  # belt only; caps handled by the chirp-z scan
     else:
         azimuth_groups = groups
@@ -304,8 +315,8 @@ def _prepare(
         plan = build_recursion_plan(geo.z[:t_half], 0, lmax)
 
         @jax.jit
-        def synth(alm):
-            Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm), ell_block)
+        def synth(alm, lam):
+            Ftot, Fsig = synth_contract_eo(plan, x_half, tri_to_dense(alm), ell_block, lam)
             G = build_full(Ftot, Fsig) * phase_table()  # (M, nrings)
             cols = [jnp.real(cap_synth(cap_plan, G, G))] if looped else []
             for g in azimuth_groups:
@@ -317,7 +328,7 @@ def _prepare(
             return jnp.concatenate(cols)[pix_to_buf]  # one gather, not ~nside scatters
 
         @jax.jit
-        def adj(m):
+        def adj(m, lam):
             cols = []
             if looped:
                 g_in, cmask = cap_gather_mask(cap_plan)
@@ -330,7 +341,7 @@ def _prepare(
                 cols.append((fr[:, g.g_plus] * ph).T)  # (M, n_g)
             V = jnp.concatenate(cols, axis=1)[:, ring_to_col]  # (M, nrings), one gather
             Vn, Vs = fold_south(V)
-            return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs, ell_block))
+            return dense_to_tri(adjoint_contract_eo(plan, x_half, Vn, Vs, ell_block, lam))
 
         return _Prepared(_opaque(synth), _opaque(adj))
 
@@ -338,11 +349,11 @@ def _prepare(
     plan_m = build_recursion_plan(geo.z[:t_half], -2, lmax)
 
     @jax.jit
-    def synth2(alm2d):  # (2, K) -> (2, npix)
+    def synth2(alm2d, lam):  # (2, K) -> (2, npix)
         aE = tri_to_dense(alm2d[0])
         aB = tri_to_dense(alm2d[1])
         FpN, FpS, FmN, FmS = synth_contract_spin2_ns(
-            plan_p, plan_m, x_half, -(aE + 1j * aB), -(aE - 1j * aB), ell_block
+            plan_p, plan_m, x_half, -(aE + 1j * aB), -(aE - 1j * aB), ell_block, lam
         )
         phase = phase_table()
         Fp = build_full(FpN, FpS) * phase
@@ -359,7 +370,7 @@ def _prepare(
         return jnp.stack([jnp.real(qu), jnp.imag(qu)])
 
     @jax.jit
-    def adj2(maps2d):  # (2, npix) -> (2, K)
+    def adj2(maps2d, lam):  # (2, npix) -> (2, K)
         colsp = []
         colsm = []
         if looped:
@@ -379,7 +390,9 @@ def _prepare(
         Vm = jnp.concatenate(colsm, axis=1)[:, ring_to_col]
         Vpn, Sp = fold_south(Vp)
         Vmn, Sm = fold_south(Vm)
-        p2, m2 = adjoint_contract_spin2_ns(plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm, ell_block)
+        p2, m2 = adjoint_contract_spin2_ns(
+            plan_p, plan_m, x_half, Vpn, Sp, Vmn, Sm, ell_block, lam
+        )
         aE = 0.5 * (-p2 - m2)
         aB = 0.5 * (1j * p2 - 1j * m2)
         return jnp.stack([dense_to_tri(aE), dense_to_tri(aB)])
@@ -388,9 +401,132 @@ def _prepare(
 
 
 # --------------------------------------------------------------------------- #
+# stored Legendre tables
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True)
+class LegendreTables:
+    """Stored lambda tables for one ``(nside, lmax, spin)``, from :func:`legendre_tables`.
+
+    A pytree: ``lam`` (``(lam,)`` for spin 0, ``(lam_p, lam_m)`` for spin 2, each
+    ``(nb, K, R, T)`` float64) are its leaves; ``nside``, ``lmax``, ``spin`` and the
+    l-block ``ell_block`` (= ``K``) are static metadata.  Pass it to the transforms as
+    ``tables=``, and into any ``jit`` / ``lax.scan`` as an argument, never as a
+    closed-over value: a closed-over array is compiled into the program as a constant
+    (one copy per use, loaded outside JAX's GPU memory pool).
+    """
+
+    lam: tuple
+    nside: int
+    lmax: int
+    spin: int
+    ell_block: int
+
+
+jax.tree_util.register_dataclass(
+    LegendreTables, data_fields=["lam"], meta_fields=["nside", "lmax", "spin", "ell_block"]
+)
+
+
+def _table_block(nside: int, lmax: int, spin: int, ell_block: int | str | None) -> int:
+    fold = _fold_np(lmax, abs(spin))
+    setting = get_ell_block() if ell_block is None else ell_block
+    return resolve_ell_block(setting, fold.R, 2 * nside, 1 if spin == 0 else 2)
+
+
+def legendre_tables_nbytes(
+    nside: int, lmax: int, spin: int = 0, ell_block: int | str | None = None
+) -> int:
+    """Device bytes of :func:`legendre_tables` for these arguments.
+
+    ``8 * n_tab * nb * K * R * T`` with ``n_tab`` = 1 (spin 0) or 2 (spin 2),
+    ``R = ceil((lmax+1)/2)`` folded rows, ``T = 2*nside`` half-grid colatitudes,
+    ``K`` the l-block (``ell_block``, default the current :func:`jht.set_ell_block`
+    setting) and ``nb = ceil(S/K)`` blocks over the ``S ~ lmax+2`` folded steps.
+    About 2.4 GB per table at ``nside=512, lmax=768``.
+    """
+    if spin not in (0, 2):
+        raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
+    fold = _fold_np(lmax, spin)
+    K = _table_block(nside, lmax, spin, ell_block)
+    nb = -(-fold.S // K)
+    return 8 * (1 if spin == 0 else 2) * nb * K * fold.R * 2 * nside
+
+
+@lru_cache(maxsize=None)
+def _table_builder(nside: int, lmax: int, spin: int, K: int) -> Callable[[], tuple]:
+    x_half = RingInfo(nside).z[: 2 * nside]
+    if spin == 0:
+        plan = build_recursion_plan(x_half, 0, lmax)
+        return jax.jit(lambda: (lambda_blocks_one(plan, x_half, K),))
+    plan_p = build_recursion_plan(x_half, 2, lmax)
+    plan_m = build_recursion_plan(x_half, -2, lmax)
+    return jax.jit(lambda: tuple(lambda_blocks_two(plan_p, plan_m, x_half, K)))
+
+
+def legendre_tables(
+    nside: int, lmax: int, spin: int = 0, ell_block: int | str | None = None
+) -> LegendreTables:
+    """Precompute the Legendre (spin 0) or Wigner-d (spin 2) tables the transforms use.
+
+    With ``tables=`` the on-grid transforms (:func:`synthesis`,
+    :func:`adjoint_synthesis`, :func:`jht.analysis`) read lambda from these tables
+    instead of running the l-recursion on every call: the table holds the values the
+    recursion produces, and the contraction is unchanged.  Worth it when one
+    ``(nside, lmax, spin)`` is transformed many times and the memory is available;
+    see :func:`legendre_tables_nbytes` for the size (about 2.4 GB per table at
+    ``nside=512, lmax=768``; spin 2 holds two).
+
+    ``ell_block`` fixes the table's l-block ``K`` (default: the current
+    :func:`jht.set_ell_block` setting); the transforms then contract in blocks of that
+    ``K``.  Called eagerly the result is a concrete device array; called inside a
+    ``jit`` it is built in-trace.  Pass it into jitted code as an argument.
+    """
+    if spin not in (0, 2):
+        raise NotImplementedError(f"spin={spin} unsupported (only 0 and 2)")
+    K = _table_block(nside, lmax, spin, ell_block)
+    lam = _table_builder(int(nside), int(lmax), int(spin), K)()
+    return LegendreTables(tuple(lam), int(nside), int(lmax), int(spin), K)
+
+
+def _tracer_type() -> type:
+    from jax._src.core import Tracer
+
+    return Tracer
+
+
+def _under_jit() -> bool:
+    """True while staging a jaxpr (``jit``, ``lax.scan`` / ``map`` bodies)."""
+    from jax._src import core as _core
+
+    f = getattr(_core, "unsafe_am_i_under_a_jit", None) or getattr(
+        _core, "unsafe_am_i_under_a_jit_DO_NOT_USE", None
+    )
+    return bool(f()) if f is not None else False
+
+
+def _lam_arg(tables: Any, nside: int, lmax: int, spin: int):
+    """Validate ``tables`` for one transform; return the contraction's ``lam`` argument."""
+    if tables is None:
+        return None
+    if not isinstance(tables, LegendreTables):
+        raise TypeError(f"tables must be a jht.LegendreTables, got {type(tables).__name__}")
+    if (tables.nside, tables.lmax, tables.spin) != (nside, lmax, spin):
+        raise ValueError(
+            f"tables are for (nside, lmax, spin) = {(tables.nside, tables.lmax, tables.spin)}, "
+            f"transform is {(nside, lmax, spin)}"
+        )
+    if _under_jit() and not all(isinstance(a, _tracer_type()) for a in tables.lam):
+        raise ValueError(
+            "concrete Legendre tables inside a jit / lax.scan trace would be compiled in as "
+            "constants; pass the LegendreTables into the jitted function as an argument"
+        )
+    return tables.lam[0] if spin == 0 else tuple(tables.lam)
+
+
+# --------------------------------------------------------------------------- #
 # public transforms
 # --------------------------------------------------------------------------- #
-def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
+def synthesis(alm, nside: int, lmax: int, spin: int = 0, *, tables=None) -> jax.Array:
     """``S: a_lm -> map`` on the HEALPix RING grid.
 
     Parameters
@@ -401,6 +537,9 @@ def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     nside, lmax : int
     spin : int
         ``0`` (temperature) or ``2`` (polarization Q/U).
+    tables : LegendreTables, optional
+        Stored tables from :func:`legendre_tables` for this ``(nside, lmax, spin)``;
+        read in place of the l-recursion.
 
     Returns
     -------
@@ -414,10 +553,12 @@ def synthesis(alm, nside: int, lmax: int, spin: int = 0) -> jax.Array:
             f"alm shape {alm.shape} != expected {expect} for lmax={lmax}, spin={spin} "
             "(a wrong-size alm would otherwise be silently clamped by the gather)"
         )
-    return _prepare(nside, lmax, spin, get_azimuth_fft_mode(), get_ell_block()).synth(alm)
+    lam = _lam_arg(tables, nside, lmax, spin)
+    prep = _prepare(nside, lmax, spin, get_azimuth_fft_mode(), get_ell_block(), get_cap_chunk())
+    return prep.synth(alm, lam)
 
 
-def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
+def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0, *, tables=None) -> jax.Array:
     """``S^T = Y^H : map -> a_lm`` -- the *exact* transpose of :func:`synthesis`.
 
     ``b_{l,m} = sum_p conj(Y_{l,m}(p)) m_p``.  This is **not** the weighted
@@ -430,6 +571,7 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
     ``(2 - delta_{m0})``-weighted a_lm inner product.  For ``spin=2`` the spin-2
     adjoint carries the factor-1/2 (m>0 conjugate-symmetry weight) so it is the
     strict transpose; the input is ``(2, npix)`` (Q, U) and the output ``(2, K)``.
+    ``tables``: as in :func:`synthesis`.
     """
     m = jnp.asarray(m)
     npix = 12 * nside * nside
@@ -439,4 +581,6 @@ def adjoint_synthesis(m, nside: int, lmax: int, spin: int = 0) -> jax.Array:
             f"map shape {m.shape} != expected {expect} for nside={nside}, spin={spin} "
             "(a wrong-size map would otherwise be silently clamped by the gather)"
         )
-    return _prepare(nside, lmax, spin, get_azimuth_fft_mode(), get_ell_block()).adj(m)
+    lam = _lam_arg(tables, nside, lmax, spin)
+    prep = _prepare(nside, lmax, spin, get_azimuth_fft_mode(), get_ell_block(), get_cap_chunk())
+    return prep.adj(m, lam)
