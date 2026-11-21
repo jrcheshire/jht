@@ -189,6 +189,11 @@ def test_guards():
     a = jnp.zeros(jht.alm_size(lmax), complex)
     with pytest.raises(ValueError, match="constants"):
         jax.jit(lambda a: jht.synthesis(a, nside, lmax, 0, tables=t))(a)  # closed over
+    m = jnp.zeros(12 * nside**2)
+    with pytest.raises(ValueError, match="constants"):  # checked before the custom_vjp
+        jax.jit(lambda a: jht.synthesis_vjp(a, nside, lmax, 0, tables=t))(a)
+    with pytest.raises(ValueError, match="constants"):
+        jax.jit(lambda m: jht.adjoint_synthesis_vjp(m, nside, lmax, 0, tables=t))(m)
     with pytest.raises(ValueError, match="nside, lmax, spin"):
         jht.synthesis(jnp.zeros(jht.alm_size(12), complex), nside, 12, 0, tables=t)
     with pytest.raises(ValueError, match="nside, lmax, spin"):

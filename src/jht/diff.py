@@ -36,7 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ._analysis import analysis
-from .healpix import adjoint_synthesis, alm_metric_weight, alm_size, synthesis
+from .healpix import _lam_arg, adjoint_synthesis, alm_metric_weight, alm_size, synthesis
 from .masked import alm_to_real, n_dof, real_to_alm
 from .offgrid import adjoint_synthesis_general, grid_to_sky, sky_to_grid, synthesis_general
 
@@ -184,6 +184,7 @@ def synthesis_vjp(alm, nside: int, lmax: int, spin: int = 0, *, tables=None) -> 
     a = jnp.asarray(alm)
     if not jnp.iscomplexobj(a):
         a = a.astype(jnp.result_type(a.dtype, jnp.complex64))
+    _lam_arg(tables, int(nside), int(lmax), int(spin))  # before custom_vjp lifts it to a tracer
     return _synthesis_vjp(a, tables, int(nside), int(lmax), int(spin))
 
 
@@ -200,6 +201,7 @@ def adjoint_synthesis_vjp(
     m = jnp.asarray(maps)
     if not jnp.issubdtype(m.dtype, jnp.floating):
         m = m.astype(jnp.result_type(float))
+    _lam_arg(tables, int(nside), int(lmax), int(spin))  # before custom_vjp lifts it to a tracer
     return _adjoint_synthesis_vjp(m, tables, int(nside), int(lmax), int(spin))
 
 
